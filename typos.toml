@@ -25,6 +25,8 @@ extend-exclude = [
   "packaging/math-renderer/package-lock.json",
   # The icon picker's bundled emoji: CLDR's names and keywords ("Claus", "hashi"), generated.
   "crates/strata-components/src/controls/icon_picker/emoji/emoji.tsv",
+  # Vendored upstream Rune crate (vendor/rune/README.md remains checked).
+  "vendor/rune/crates/**",
 ]
 
 [default]

@@ -1,0 +1,245 @@
+//! What a copy writes and a paste reads: [`ClipboardContent`] and its [`ClipboardImage`].
+use std::path::PathBuf;
+use std::sync::Arc;
+use zeroize::Zeroizing;
+
+use crate::edit::Wiped;
+use super::{WebFile, sanitize_html};
+
+/// What a copy puts on the clipboard, or what a paste found there: plain text, and optionally
+/// HTML, RTF, an image and files. Debug output never includes its contents.
+///
+/// ```
+/// # use rune::clipboard::ClipboardContent;
+/// let content = ClipboardContent::new("Hello world").with_html("<b>Hello</b> world");
+/// assert_eq!(content.html(), Some("<b>Hello</b> world"));
+/// ```
+///
+/// The text may be empty when another form carries the content: a copied image or file list
+/// needs no text, and an empty text isn't written beside it. Plain fields and text `on_paste`
+/// handlers don't receive such a paste; hooks that take every form do.
+///
+/// Read from the clipboard, `html` has had scripts and other active content removed
+/// ([`sanitize_html`]), and on macOS holds RTF converted to HTML when the source offered only
+/// RTF. It's still untrusted input from another app: parse it into your model, don't render it
+/// in a web view as is. `rtf` is passed through untouched.
+#[derive(Clone, Default)]
+pub struct ClipboardContent {
+    // Wiped as they go, eight bytes a write: a 1.7 MB paste's text is gone in a tenth of a
+    // millisecond, where `Zeroizing`'s byte at a time took most of one in the paste's frame.
+    pub(super) text: Wiped,
+    html: Option<Wiped>,
+    rtf: Option<Wiped>,
+    image: Option<ClipboardImage>,
+    files: Vec<PathBuf>,
+    web_files: Vec<WebFile>,
+    pub(super) own_pills: bool,
+}
+impl PartialEq for ClipboardContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.html == other.html && self.rtf == other.rtf && self.image == other.image && self.files == other.files
+            && self.web_files == other.web_files
+    }
+}
+impl Eq for ClipboardContent {}
+impl ClipboardContent {
+    /// Plain text, the form every app can paste. Empty when only other forms carry content.
+    pub fn new(text: impl Into<String>) -> Self { Self { text: Wiped(text.into()), ..Self::default() } }
+    /// Adds an HTML form (a fragment or a document), for apps that paste formatted text.
+    pub fn with_html(mut self, html: impl Into<String>) -> Self { self.html = Some(Wiped(html.into())); self }
+    /// Adds an RTF form, for apps that read RTF but not HTML.
+    pub fn with_rtf(mut self, rtf: impl Into<String>) -> Self { self.rtf = Some(Wiped(rtf.into())); self }
+    /// Adds an image. macOS writes it as PNG and TIFF beside the other forms; Windows and Linux
+    /// write it alone (see [`Tx::copy_rich`](crate::Tx::copy_rich)); the web as PNG.
+    pub fn with_image(mut self, image: ClipboardImage) -> Self { self.image = Some(image); self }
+    /// Adds files, so a paste into a file manager copies them. macOS writes one file URL item
+    /// per file; Windows and Linux write the file list alone; the web skips them. Paths should
+    /// be absolute.
+    pub fn with_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self { self.files.extend(files); self }
+    pub fn text(&self) -> &str { &self.text }
+    pub fn html(&self) -> Option<&str> { self.html.as_deref().map(String::as_str) }
+    pub fn rtf(&self) -> Option<&str> { self.rtf.as_deref().map(String::as_str) }
+    /// The image on the clipboard, as PNG. Only pastes to a hook carry one: a field's
+    /// `on_input_paste`, a root `on_paste_content` or `Tx::read_clipboard`.
+    pub fn image(&self) -> Option<&ClipboardImage> { self.image.as_ref() }
+    /// The files on the clipboard. Like the image, only pastes to a hook carry them.
+    pub fn files(&self) -> &[PathBuf] { &self.files }
+    /// The browser files a paste or drop on the web offered the focused field, at most
+    /// [`MAX_WEB_FILES`](super::MAX_WEB_FILES), with no paths and no bytes read: call
+    /// `WebFile::read` (wasm32) for the ones the app takes. Like the image, only hooks hear them (a
+    /// field's `on_input_paste` or a root `on_paste_content`; never a password field). Some
+    /// files come twice: a pasted or dropped PNG is also the [`image`](Self::image), and the
+    /// contents of a dropped text file of at most 1 MiB are also the [`text`](Self::text).
+    /// Always empty on native platforms.
+    pub fn web_files(&self) -> &[WebFile] { &self.web_files }
+    #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+    pub(crate) fn with_web_files(mut self, files: Vec<WebFile>) -> Self { self.web_files.extend(files); self }
+    /// HTML, RTF, an image or files beside the text.
+    pub fn is_rich(&self) -> bool {
+        self.html.is_some() || self.rtf.is_some() || self.image.is_some() || !self.files.is_empty() || !self.web_files.is_empty()
+    }
+    /// No text and no other form.
+    pub fn is_empty(&self) -> bool { self.text.is_empty() && !self.is_rich() }
+    /// Content from another app: its HTML sanitised.
+    pub(crate) fn untrusted(mut self) -> Self {
+        if let Some(html) = &mut self.html { *html = Wiped(sanitize_html(html)); }
+        self
+    }
+    /// Whether this clipboard read carries `<span data-pill="…">` HTML that this app itself
+    /// wrote on its last copy, verified against the clipboard revision and plain-text
+    /// fingerprint. Returns `false` for HTML written by another application or after the
+    /// clipboard has changed, so an [`El::on_input_paste`](crate::El::on_input_paste) hook can
+    /// tell its own rich pill copy apart from external HTML.
+    ///
+    /// ```
+    /// # use rune::clipboard::ClipboardContent;
+    /// let external = ClipboardContent::new("@ada")
+    ///     .with_html(r#"<span data-pill="u:1">@ada</span>"#);
+    /// assert!(!external.has_own_pills());
+    /// ```
+    pub fn has_own_pills(&self) -> bool { self.own_pills }
+    /// Marks clipboard content as carrying this app's verified pill copy (used on wasm32).
+    pub(crate) fn mark_own_pills(&mut self) { self.own_pills = true; }
+    /// Text, HTML and RTF only, for a rich text target: no image or files to decode or list.
+    /// None when the image or files were all it had, so a paste of them alone changes nothing;
+    /// genuinely empty text stays.
+    pub(super) fn text_forms(mut self) -> Option<Self> {
+        let had = !self.is_empty();
+        self.image = None;
+        self.files.clear();
+        self.web_files.clear();
+        (!had || !self.is_empty()).then_some(self)
+    }
+    /// Plain consumers (a field without an `on_input_paste`, a text `on_paste`) take it: it
+    /// has text, or nothing else. Rich-only content (an HTML clipboard with no plain text)
+    /// reaches only rich hooks, as before it reached no one.
+    pub(crate) fn has_plain(&self) -> bool { !self.text.is_empty() || !self.is_rich() }
+}
+impl From<String> for ClipboardContent {
+    fn from(text: String) -> Self { Self::new(text) }
+}
+impl From<&str> for ClipboardContent {
+    fn from(text: &str) -> Self { Self::new(text) }
+}
+impl From<Zeroizing<String>> for ClipboardContent {
+    fn from(mut text: Zeroizing<String>) -> Self { Self { text: Wiped(std::mem::take(&mut *text)), ..Self::default() } }
+}
+impl std::fmt::Debug for ClipboardContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardContent")
+            .field("text", &self.text.len())
+            .field("html", &self.html.as_ref().map(|h| h.len()))
+            .field("rtf", &self.rtf.as_ref().map(|r| r.len()))
+            .field("image", &self.image)
+            .field("files", &self.files.len())
+            .field("web_files", &self.web_files.len())
+            .finish()
+    }
+}
+
+/// The largest image a paste carries, as PNG. A bigger one is left out, and the paste
+/// carries the clipboard's other forms.
+pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+/// The most pixels a pasted image may have (64 MP, e.g. an 8K screenshot: 256 MiB of RGBA).
+const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+
+pub(crate) fn valid_image_size(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
+}
+
+/// An image as PNG bytes: one to copy, or one a paste found in whatever form the clipboard held
+/// it (TIFF on macOS, a DIB on Windows). Cheap to clone. Debug output shows only its size.
+///
+/// ```
+/// # use rune::clipboard::{ClipboardContent, ClipboardImage};
+/// # let png = [&b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"[..], &[0, 0, 0, 2, 0, 0, 0, 3]].concat();
+/// let image = ClipboardImage::from_png(png).unwrap();
+/// assert_eq!(image.size(), (2, 3));
+/// let content = ClipboardContent::new("").with_image(image);
+/// assert!(content.image().is_some_and(|i| i.png().starts_with(b"\x89PNG")));
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClipboardImage { png: Arc<[u8]>, size: (u32, u32) }
+impl ClipboardImage {
+    /// PNG bytes, or `None` when they don't start with a PNG header or pass
+    /// [`MAX_IMAGE_BYTES`].
+    pub fn from_png(png: impl Into<Arc<[u8]>>) -> Option<Self> {
+        let png = png.into();
+        if png.len() > MAX_IMAGE_BYTES || png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" { return None; }
+        let be = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+        let size = (be(16), be(20));
+        if !valid_image_size(size.0, size.1) { return None; }
+        Some(Self { png, size })
+    }
+    /// Straight-alpha sRGB RGBA8 pixels (`width * height * 4` bytes, rows top first), encoded
+    /// synchronously as PNG on the calling thread (required because [`Self::png`] is
+    /// synchronous; large images can take seconds—e.g. ~3.3 s for a 4000×3000 photo). Returns
+    /// `None` when the length doesn't match, a side is zero, the image passes 64 megapixels, or
+    /// its PNG passes [`MAX_IMAGE_BYTES`]. To copy an image an [`ImageCache`](crate::ImageCache)
+    /// decoded without blocking the event thread, use [`Tx::copy_image`](crate::Tx::copy_image)
+    /// or [`Tx::copy_image_then`](crate::Tx::copy_image_then) instead.
+    ///
+    /// ```
+    /// # use rune::clipboard::ClipboardImage;
+    /// let image = ClipboardImage::from_rgba(2, 1, &[255, 0, 0, 255, 0, 0, 255, 128]).unwrap();
+    /// assert_eq!(image.size(), (2, 1));
+    /// assert!(ClipboardImage::from_rgba(2, 2, &[0; 4]).is_none());
+    /// ```
+    pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
+        if !valid_image_size(width, height) { return None; }
+        Self::from_png(crate::drag_out::encode_png(width, height, rgba)?)
+    }
+    /// Decodes the PNG to 8-bit RGBA, for clipboards that take pixels.
+    #[cfg(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android")))))]
+    pub(crate) fn to_rgba(&self) -> Option<image::RgbaImage> {
+        crate::image::png_rgba8(&self.png).ok()
+    }
+    /// The PNG file's bytes, ready to save, upload or decode.
+    pub fn png(&self) -> &[u8] { &self.png }
+    /// Width and height in pixels, from the PNG header.
+    pub fn size(&self) -> (u32, u32) { self.size }
+}
+impl std::fmt::Debug for ClipboardImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardImage").field("size", &self.size).field("bytes", &self.png.len()).finish()
+    }
+}
+
+/// Why [`Tx::copy_image`](crate::Tx::copy_image) or
+/// [`Tx::copy_image_then`](crate::Tx::copy_image_then) did not put the image on the clipboard.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CopyImageError {
+    /// The image has not finished decoding yet.
+    NotReady,
+    /// Decoding the image failed.
+    DecodeFailed(crate::ImageError),
+    /// The image exceeded 64 megapixels or its encoded PNG exceeded [`MAX_IMAGE_BYTES`].
+    TooLarge,
+    /// A newer clipboard write (from this app or another) superseded this copy before it
+    /// wrote to the clipboard.
+    Superseded,
+    /// The OS or browser clipboard rejected or could not perform the write.
+    Failed(String),
+}
+
+impl std::fmt::Display for CopyImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotReady => f.write_str("image is still decoding"),
+            Self::DecodeFailed(err) => write!(f, "image failed to decode: {err}"),
+            Self::TooLarge => f.write_str("image exceeds clipboard size limits"),
+            Self::Superseded => f.write_str("copy superseded by a newer clipboard write"),
+            Self::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for CopyImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::DecodeFailed(err) => Some(err),
+            _ => None,
+        }
+    }
+}

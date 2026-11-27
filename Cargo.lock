@@ -3687,7 +3687,6 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=7a7ed14e93ef00782a6c7c9a672608a9ba778cdb#7a7ed14e93ef00782a6c7c9a672608a9ba778cdb"
 dependencies = [
  "accesskit",
  "accesskit_macos",

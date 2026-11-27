@@ -202,6 +202,11 @@ undocumented_unsafe_blocks = "deny"
 unimplemented = "warn"
 unwrap_used = "warn"
 
+# Tome vendors `crates/rune` with local patches (vendor/rune/README.md).
+# The patch URL must match the git URL on `rune`, `rune-kit`, and `rune-fx` above verbatim.
+[patch."https://github.com/anomalyco/rune"]
+rune = { path = "vendor/rune/crates/rune" }
+
 # Patches Rune's root Cargo.toml carries ("Depending on Rune" in crates/rune/README.md).
 # Cargo does not inherit a dependency's [patch] table; move these revs with `rune` above.
 [patch.crates-io]
