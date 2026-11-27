@@ -25,8 +25,9 @@ stack live in layered crates under `crates/`.
 `cargo deny --workspace check` (`deny.toml`) enforces the layering and bans `gtk4`, `gdk4`,
 `gdk4-wayland`, `gdk4-x11`, `sourceview5`, `gstreamer`, and `gstreamer-app` workspace-wide:
 
-- **Rune is pinned once.** `rune`, `rune-kit`, `rune-fx`, and Rune's `[patch.crates-io]`
-  entries pin one git rev in the root `Cargo.toml`. Move them together in a dedicated change.
+- **Rune is pinned once.** `rune`, `rune-kit`, `rune-fx`, Rune's `[patch.crates-io]`
+  entries, and Tome's vendored `vendor/rune/crates/rune` patch (`vendor/rune/README.md`)
+  pin one git rev in the root `Cargo.toml`. Move them together in a dedicated change.
 - **`strata-platform` depends on `rune` alone** (never on `rune-kit`, `strata-kit`, or any
   shared crate), carries no Strata names in its API, and gates each shim behind its own cargo
   feature (`mise run compile-features` verifies each feature in isolation).
