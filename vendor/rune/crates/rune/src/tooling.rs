@@ -152,7 +152,19 @@ pub fn extra_args() -> &'static [String] {
     EXTRA.get().map_or(&[], |v| v.as_slice())
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios", test)), allow(dead_code))]
 pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f32), env: Env, waker: Waker) -> Runtime<S> {
+    runtime_for_configured(spec, state, size, env, waker, None)
+}
+
+pub(crate) fn runtime_for_configured<S: 'static>(
+    spec: &AppSpec<S>,
+    state: S,
+    size: (f32, f32),
+    env: Env,
+    waker: Waker,
+    config: Option<crate::app::RuntimeConfig<S>>,
+) -> Runtime<S> {
     crate::marks::mark("text.begin");
     let text = TextSystem::for_window(spec.fonts, spec.families);
     crate::marks::mark("text.fonts");
@@ -161,18 +173,30 @@ pub(crate) fn runtime_for<S: 'static>(spec: &AppSpec<S>, state: S, size: (f32, f
     rt.on_key = spec.on_key;
     rt.motion.enable_motion_needs_cause();
     rt.host.window_title.start(spec.title);
-    // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`), never the machine's own
-    // settings, so a headless snap shows an app in a contrast theme or under Increase Contrast.
+    // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`,
+    // `RUNE_REDUCE_TRANSPARENCY`, `RUNE_TEXT_SCALE`), never the machine's own settings, so a
+    // headless snap shows an app in a contrast theme, under Increase Contrast / Reduce
+    // Transparency, or at a scaled system text size.
     rt.set_system_contrast(crate::platform::preferences::contrast_preset());
     rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_preset());
+    rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency_preset());
+    if let Some(text_scale) = crate::platform::text_scale::preset() {
+        rt.set_system_text_scale(text_scale);
+    }
     rt.set_live_waker(waker.clone());
     #[cfg(feature = "hot")]
     if crate::hot::enabled() {
         rt.frame.set_hot(crate::hot::Session::connect(waker.clone()));
     }
+    // Apply App-level runtime settings (including `emoji_family` and `font_smoothing`) before
+    // `setup` runs so measurements in `setup` use the window's configured `TextSystem` and keep
+    // their shaped layouts warm into the first frame.
+    if let Some(config) = config {
+        rt.configure(config);
+    }
     if let Some(f) = spec.setup {
         crate::marks::mark("app.setup");
-        f(&mut rt.state, waker);
+        crate::text::lend(&mut rt.text, || f(&mut rt.state, waker));
         crate::marks::mark("app.setup.done");
     }
     rt
@@ -397,6 +421,9 @@ pub(crate) enum Pos {
 pub(crate) enum Kind {
     /// A named time with no input effect.
     Mark(String),
+    /// Waits in headless `--script` up to `wait_s` seconds until an element with `key` exists,
+    /// pumping zero-dt frames with the clock stopped.
+    AwaitKey { key: String, wait_s: f64 },
     Focus(bool),
     /// The app reopened (macOS: its Dock icon clicked).
     Reopen,
@@ -502,7 +529,7 @@ pub(crate) fn script_input(
         Kind::ButtonUp(b) => core.button_up(app, x, y, *b),
         Kind::KeyUp(k) => { core.key_up(app, k.clone()); }
         Kind::PhysicalKey(event, k, base) => core.physical_key_input(app, event.clone(), k.clone(), *base),
-        Kind::Mark(_) | Kind::Reopen | Kind::CloseRequest | Kind::QuitRequest | Kind::OpenUrl(_) | Kind::OpenFiles(_) | Kind::Menu(_) | Kind::PopupMenu(_)
+        Kind::Mark(_) | Kind::AwaitKey { .. } | Kind::Reopen | Kind::CloseRequest | Kind::QuitRequest | Kind::OpenUrl(_) | Kind::OpenFiles(_) | Kind::Menu(_) | Kind::PopupMenu(_)
         | Kind::FileDialog(_) | Kind::FileDialogFiles(_) | Kind::Shortcut(_) | Kind::Resize(..) => return false,
     }
     true
@@ -596,6 +623,7 @@ impl Ev {
         let pointer = |action| ScriptEvent::Pointer { action, at: at() };
         let event = match &self.kind {
             Kind::Mark(name) => ScriptEvent::Mark(name.clone()),
+            Kind::AwaitKey { key, wait_s } => ScriptEvent::AwaitKey { key: key.clone(), wait_s: *wait_s },
             Kind::Focus(focused) => ScriptEvent::Focus(*focused),
             Kind::Reopen => ScriptEvent::Reopen,
             Kind::CloseRequest => ScriptEvent::CloseRequest,
@@ -661,8 +689,16 @@ pub(crate) fn desktop(args: &Args, script: Option<&Value>) -> crate::desktop::di
     let size = args.desktop.as_ref().map(|path| match args.size {
         Some((w, h)) => (f64::from(w), f64::from(h)),
         None => {
-            let (w, h) = ::image::image_dimensions(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
-            (f64::from(w) / scale, f64::from(h) / scale)
+            #[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
+            {
+                let (w, h) = ::image::image_dimensions(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+                (f64::from(w) / scale, f64::from(h) / scale)
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "png")))]
+            {
+                let _ = (path, scale);
+                die("desktop backdrop images require native or the `png` feature")
+            }
         }
     });
     crate::desktop::displays::VirtualDesktop::from_script_sized(script, scale, size).unwrap_or_else(|e| die(&e))

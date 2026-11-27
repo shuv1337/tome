@@ -55,8 +55,39 @@ impl RuntimeCore {
             has_text: text.is_some_and(|t| !t.source_text().trim().is_empty() || t.redacted),
             image: n.vis.pixels.is_some() || n.vis.surface.is_some(),
         };
-        // A control the keyboard reaches is always in the tree, whatever its role says.
-        roles::map(n.role, &cx).or_else(|| (input.is_some() || self.can_focus(i)).then_some(Role::Group))
+        // A control the keyboard reaches (or that declares custom accessibility actions) is always
+        // in the tree, whatever its role says; an explicit `role("group")` with a role description
+        // also enters the tree as a group.
+        let has_custom_actions = handlers.is_some_and(|h| h.custom_a11y_actions.as_deref().is_some_and(|a| !a.is_empty()));
+        roles::map(n.role, &cx).or_else(|| {
+            let explicit_group_rd = n.role == "group"
+                && n.a11y.explicit_group
+                && n.a11y.more.as_deref()
+                    .and_then(|m| m.role_description.as_deref())
+                    .is_some_and(|s| !s.trim().is_empty());
+            (input.is_some() || self.can_focus(i) || explicit_group_rd || has_custom_actions).then_some(Role::Group)
+        })
+    }
+
+    /// Node `i`'s effective role description (`El::role_description` / `El::role_description_static`),
+    /// or `None` when unset, empty/whitespace-only, or the element has no valid accessible role
+    /// (WAI-ARIA 1.2 `aria-roledescription`).
+    pub(crate) fn a11y_role_description(&self, i: usize) -> Option<&str> {
+        let n = &self.tree.nodes[i];
+        let desc = n.a11y.more.as_deref()?.role_description.as_deref()?;
+        if desc.trim().is_empty() {
+            return None;
+        }
+        let role = self.a11y_role(i)?;
+        if matches!(role, Role::GenericContainer) {
+            return None;
+        }
+        let has_role = if n.role == "group" {
+            n.a11y.explicit_group || !matches!(role, Role::Group | Role::ScrollView)
+        } else {
+            n.input.is_some() || roles::spec(n.role).is_some()
+        };
+        has_role.then_some(desc)
     }
 
     /// A hash of everything [`Self::a11y_node`] and its text's lines and links read of node
@@ -75,10 +106,11 @@ impl RuntimeCore {
         self.node_disabled(i).hash(&mut h);
         self.has_image_menu(i).hash(&mut h);
         n.a11y.live.hash(&mut h);
+        n.a11y.explicit_group.hash(&mut h);
         if let Some(m) = n.a11y.more.as_deref() {
             (&m.description, &m.value, &m.set, &m.shortcut, m.invalid, m.read_only, m.sorted, m.busy,
                 m.row_count, m.column_count, m.row_index, m.column_index).hash(&mut h);
-            (m.multiselectable, m.required, m.has_popup, m.orientation, m.auto_complete, m.list_start).hash(&mut h);
+            (&m.role_description, m.multiselectable, m.required, m.has_popup, m.orientation, m.auto_complete, m.current, m.list_start).hash(&mut h);
             [m.labelled_by.as_deref(), m.described_by.as_deref()].map(|k| k.and_then(|k| self.a11y_keyed(i, k)).map(|j| self.a11y_words(j))).hash(&mut h);
             if let Some(r) = m.range { [r.value, r.min, r.max, r.step.unwrap_or(f64::NAN)].map(f64::to_bits).hash(&mut h); }
             self.a11y_active_descendant(i).map(|j| self.tree.nodes[j].id.0).hash(&mut h);
@@ -147,6 +179,14 @@ impl RuntimeCore {
         let handlers = n.handlers.get();
         (handlers.is_some_and(|h| h.on_press.is_some()), handlers.is_some_and(|h| h.on_secondary_press.is_some()),
             handlers.is_some_and(|h| h.modal.is_some()), handlers.is_some_and(|h| h.has_primary())).hash(&mut h);
+        if let Some(actions) = handlers.and_then(|h| h.custom_a11y_actions.as_deref()) {
+            actions.len().hash(&mut h);
+            for action in actions {
+                (&action.id, &action.label).hash(&mut h);
+            }
+        } else {
+            0usize.hash(&mut h);
+        }
         (n.focus.selected, n.focus.step.is_some(), n.focus.set_value.is_some(), n.focus.default, n.focus.caret_browsing, self.focus_group(i).is_some()).hash(&mut h);
         if n.input.is_none() && self.is_caret_browsing_node(n) {
             self.a11y_caret_selection(i)
@@ -262,6 +302,9 @@ impl RuntimeCore {
             Some(d) if !d.is_empty() => node.set_description(d),
             _ => {}
         }
+        if let Some(rd) = self.a11y_role_description(i) {
+            node.set_role_description(rd);
+        }
         if let Some(m) = more {
             if m.invalid { node.set_invalid(accesskit::Invalid::True); }
             if m.read_only { node.set_read_only(); }
@@ -294,6 +337,16 @@ impl RuntimeCore {
                     crate::AutoComplete::Inline => accesskit::AutoComplete::Inline,
                     crate::AutoComplete::List => accesskit::AutoComplete::List,
                     crate::AutoComplete::Both => accesskit::AutoComplete::Both,
+                });
+            }
+            if let Some(cur) = m.current {
+                node.set_aria_current(match cur {
+                    crate::Current::Page => accesskit::AriaCurrent::Page,
+                    crate::Current::Step => accesskit::AriaCurrent::Step,
+                    crate::Current::Location => accesskit::AriaCurrent::Location,
+                    crate::Current::Date => accesskit::AriaCurrent::Date,
+                    crate::Current::Time => accesskit::AriaCurrent::Time,
+                    crate::Current::True => accesskit::AriaCurrent::True,
                 });
             }
             if let Some(j) = m.controls.as_deref().and_then(|k| self.a11y_related_target(i, k)) {
@@ -367,6 +420,17 @@ impl RuntimeCore {
         if actionable {
             if handlers.is_some_and(|h| h.on_press.is_some()) || input.is_some() || (w.delegated_a11y && roles::composite_item(role)) { node.add_action(Ak::Click); }
             if handlers.is_some_and(|h| h.on_secondary_press.is_some()) || self.has_image_menu(i) { node.add_action(Ak::ShowContextMenu); }
+            if let Some(actions) = handlers.and_then(|h| h.custom_a11y_actions.as_deref()).filter(|a| !a.is_empty()) {
+                let ids = super::actions::resolve_custom_action_ids(actions);
+                node.add_action(Ak::CustomAction);
+                node.set_custom_actions(
+                    actions
+                        .iter()
+                        .zip(ids)
+                        .map(|(a, id)| accesskit::CustomAction { id, description: a.label.clone() })
+                        .collect::<Vec<_>>(),
+                );
+            }
             if n.a11y.expanded.is_some() && handlers.is_some_and(|h| h.on_press.is_some()) {
                 node.add_action(if n.a11y.expanded == Some(true) { Ak::Collapse } else { Ak::Expand });
             }

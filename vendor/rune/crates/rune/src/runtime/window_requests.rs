@@ -28,6 +28,10 @@ pub(crate) struct HostState {
     pub(in crate::runtime) system_contrast: Option<crate::SystemContrast>,
     /// What [`Cx::system_increased_contrast`] reports.
     pub(in crate::runtime) system_increased_contrast: bool,
+    /// What [`Cx::system_text_scale`] reports (`1.0` by default).
+    pub(in crate::runtime) system_text_scale: f32,
+    /// What [`Cx::system_reduced_transparency`] reports.
+    pub(in crate::runtime) system_reduced_transparency: bool,
     pub(in crate::runtime) scroll_bars: system_settings::ScrollBarHost,
     /// Preferred languages set via `Runtime::set_languages` or browser `languagechange` (`None`: lazy OS query).
     pub(in crate::runtime) system_languages: Option<Rc<[String]>>,
@@ -71,6 +75,9 @@ pub(crate) struct HostState {
     /// A user-initiated close request (`Tx::request_user_close`) waiting for the host's
     /// `close_requested` gate.
     pub(crate) user_close_request: bool,
+    /// `Tx::request_urgent_frame` waiting for the host to arm one-shot macOS display-link
+    /// admission on the next drawn frame.
+    pub(crate) urgent_frame: bool,
     /// A handler or `update` asked to minimize the window (`Tx::minimize`); the shell takes it,
     /// after a show the same turn asked for (`window::Minimize`).
     pub(crate) minimize: crate::window::Minimize,
@@ -100,7 +107,10 @@ pub(crate) struct HostState {
     /// Test-only seam forcing `App::on_field_menu` even where `popup_menu_supported()` is true.
     #[cfg(test)]
     pub(crate) force_field_menu_fallback: bool,
-    /// The file dialog asked for (`Tx::open_file`, `Tx::save_file`) and not yet answered.
+    /// True when the embedding host presents file dialogs itself rather than refusing them.
+    #[cfg_attr(not(any(test, target_vendor = "apple")), allow(dead_code))]
+    pub(crate) file_dialogs: bool,
+    /// The file dialog asked for (`Tx::open_file`, `Tx::pick_file`, `Tx::save_file`) and not yet answered.
     pub(in crate::runtime) file_dialog: crate::file_dialog::DialogState,
     /// File dialog callbacks, by id, until their answer runs.
     pub(in crate::runtime) file_dialog_answers: Vec<(u64, crate::file_dialog::AnswerFn)>,
@@ -116,6 +126,16 @@ pub(crate) struct HostState {
     pub(in crate::runtime) wm_state: crate::WindowManagerState,
     /// Whether the last committed view read `Cx::decoration_mode`, `Cx::tiled_edges`, or `Cx::window_actions`.
     pub(in crate::runtime) wm_state_read: bool,
+    /// Per-window native primary pointer mode (`Cx::touch_controls`, `Cx::hover_none`).
+    pub(in crate::runtime) primary_pointer: cx::PrimaryPointer,
+    /// Whether the last committed view read `Cx::touch_controls` or `Cx::hover_none`.
+    pub(in crate::runtime) primary_pointer_read: bool,
+    /// Last sampled OS tablet/slate-mode posture, so focus changes on hybrid touchscreen laptops
+    /// preserve live touch vs. mouse mode unless the system posture itself transitioned.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub(in crate::runtime) system_tablet_mode: Option<bool>,
+    #[cfg(target_os = "windows")]
+    pub(in crate::runtime) tablet_setting_gen: u64,
     /// Host-supplied safe-area insets `[top, right, bottom, left]` in logical points
     /// (`Runtime::set_safe_area`); `None` falls back to browser insets on wasm32 or `[0.0; 4]`.
     pub(in crate::runtime) safe_area: Option<[f32; 4]>,
@@ -144,6 +164,8 @@ impl HostState {
             system_accent: crate::SystemAccent::DEFAULT,
             system_contrast: None,
             system_increased_contrast: false,
+            system_text_scale: crate::platform::text_scale::DEFAULT,
+            system_reduced_transparency: false,
             scroll_bars: Default::default(),
             system_languages: None,
             languages_gen: 0,
@@ -165,6 +187,7 @@ impl HostState {
             fit: Default::default(),
             overlay_fit: None,
             user_close_request: false,
+            urgent_frame: false,
             minimize: Default::default(),
             url_requests: Vec::new(),
             path_requests: Vec::new(),
@@ -180,6 +203,7 @@ impl HostState {
             deferred_field_menu_pick: None,
             #[cfg(test)]
             force_field_menu_fallback: false,
+            file_dialogs: false,
             file_dialog: Default::default(),
             file_dialog_answers: Vec::new(),
             next_file_dialog: 0,
@@ -189,6 +213,11 @@ impl HostState {
             page: None,
             wm_state: crate::WindowManagerState::default(),
             wm_state_read: false,
+            primary_pointer: cx::PrimaryPointer::Hover,
+            primary_pointer_read: false,
+            system_tablet_mode: None,
+            #[cfg(target_os = "windows")]
+            tablet_setting_gen: 0,
             safe_area: None,
             visual_viewport_y: None,
         }
@@ -591,6 +620,12 @@ impl RuntimeCore {
     #[inline]
     pub(crate) fn take_user_close_request(&mut self) -> bool {
         std::mem::take(&mut self.host.user_close_request)
+    }
+
+    /// Takes a latched `Tx::request_urgent_frame` request for the host.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn take_urgent_frame(&mut self) -> bool {
+        std::mem::take(&mut self.host.urgent_frame)
     }
 
     /// Whether a user-initiated close request is pending for the host.

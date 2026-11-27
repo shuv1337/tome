@@ -63,6 +63,9 @@ impl RuntimeCore {
             self.touch_wheel_event_at(ev, (x, y));
             return;
         }
+        if !self.pointer.is_touch_input() {
+            self.sync_primary_pointer(cx::PrimaryPointer::Hover);
+        }
         if ev.phase == GesturePhase::Began { self.wheel_began(); }
         let moved = ev.dx != 0.0 || ev.dy != 0.0;
         if moved {
@@ -369,7 +372,7 @@ impl RuntimeCore {
             None => return false,
         };
         if self.gesture_chain(x, y, |g| g.magnify.is_some()).is_empty() { return false; }
-        self.magnify_event(MagnifyEvent { wheel: true, ..MagnifyEvent::new(delta).at(x, y) });
+        self.magnify_event(MagnifyEvent::new(delta).at(x, y).wheel(true));
         true
     }
 
@@ -499,6 +502,25 @@ impl RuntimeCore {
         false
     }
 
+    /// Whether an allowed, non-exiting element under window point `(x, y)` handles pinch
+    /// magnification (`El::on_magnify` / `El::on_magnify_any`) or two-finger rotation
+    /// (`El::on_rotate`). Used on Safari/WebKit so `gesturestart` / `gesturechange` only
+    /// prevents native browser pinch-zoom when a Rune element actually claims the gesture.
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    pub(crate) fn has_magnify_or_rotate(&self, x: f32, y: f32) -> bool {
+        let mut at = self.chain_start(x, y);
+        while let Some(i) = at {
+            if self.subtree_exiting(i) || !self.allowed(i) { break; }
+            if self.tree.nodes[i].handlers.gestures.as_deref()
+                .is_some_and(|g| g.magnify.is_some() || g.rotate.is_some())
+            {
+                return true;
+            }
+            at = self.tree.nodes[i].parent;
+        }
+        false
+    }
+
     /// The elements under window point (x, y) with a handler `has` picks, innermost first,
     /// walking every ancestor up to the root (or open modal) past scroll views.
     pub(super) fn gesture_chain(&self, x: f32, y: f32, has: impl Fn(&CanvasInput) -> bool) -> Vec<String> {
@@ -571,6 +593,9 @@ impl RuntimeCore {
             PointerButton::Primary => return self.pointer_down(app, x, y),
             PointerButton::Secondary => return self.secondary_down(x, y),
             _ => {}
+        }
+        if !self.pointer.is_touch_input() {
+            self.sync_primary_pointer(cx::PrimaryPointer::Hover);
         }
         let (x, y) = self.locked_point(x, y);
         let starts_gesture = !self.pointer.any_button_down() && !self.pointer.captured();

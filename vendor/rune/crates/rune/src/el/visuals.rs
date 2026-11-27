@@ -217,6 +217,7 @@ impl El {
         cold.pixels = Some(pixels.clone());
         cold.pixels_fit = None;
         cold.pixels_wrap = None;
+        cold.web_image = None;
         self
     }
     /// Shows `pixels` at its own aspect ratio, centred: `Fit` letterboxes the whole image inside
@@ -226,6 +227,7 @@ impl El {
         cold.pixels = Some(pixels.clone());
         cold.pixels_fit = Some(fit);
         cold.pixels_wrap = None;
+        cold.web_image = None;
         self
     }
     /// Places `pixels` at `rect` (`[x, y, w, h]` in points from the element's top-left, allowed
@@ -260,6 +262,7 @@ impl El {
         cold.pixels = Some(pixels.clone());
         cold.pixels_fit = None;
         cold.pixels_wrap = Some((rect, wrap));
+        cold.web_image = None;
         self
     }
     /// Repeats `pixels` across the element from its top-left at `tile` (`[w, h]` points per
@@ -375,7 +378,9 @@ impl El {
     /// show through each other. Static, as [`Self::dim`] is: a change lands at once, and
     /// animation and hit-test opacity still belong to `opacity` / `live_opacity`. Only an
     /// element below 1 whose paint overlaps (children, or more than one paint of its own) draws
-    /// offscreen; anything else just takes the alpha. Repeated calls multiply.
+    /// offscreen; anything else just takes the alpha. Repeated calls multiply. Inspection tools
+    /// read the composed product via [`ElementInfo::layer_opacity`](crate::ElementInfo::layer_opacity)
+    /// (and `layerOpacity` in `--tree` JSON).
     pub fn layer_opacity(mut self, alpha: f32) -> Self {
         let alpha = alpha.clamp(0.0, 1.0);
         if alpha < 1.0 || !self.vis.cold.is_empty() {
@@ -725,8 +730,25 @@ impl El {
     /// Curves for this element's hover track: `enter` when the pointer arrives, `exit` when it
     /// leaves (e.g. a delayed reveal).
     pub fn hover_motion(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
-        self.vis.cold_mut().hover_motion = Some(Rc::new((enter.into(), exit.into())));
+        let c = self.vis.cold_mut();
+        c.hover_motion = Some(Rc::new((enter.into(), exit.into())));
+        c.hover_motion_default = false;
         self
+    }
+    /// [`Self::hover_motion`] with curves a theme or token chose rather than this element: an
+    /// explicit [`Self::hover_motion`] on this element (before or after) or an enclosing
+    /// [`Self::hover_motion_within`] overrides it.
+    pub fn token_hover_motion(mut self, enter: impl Into<Anim>, exit: impl Into<Anim>) -> Self {
+        if self.vis.hover_motion.is_none() || self.vis.hover_motion_default {
+            let c = self.vis.cold_mut();
+            c.hover_motion = Some(Rc::new((enter.into(), exit.into())));
+            c.hover_motion_default = true;
+        }
+        self
+    }
+    /// The pair set by [`Self::hover_motion`] or [`Self::token_hover_motion`].
+    pub fn hover_motion_curves(&self) -> Option<(Anim, Anim)> {
+        self.vis.hover_motion.as_deref().copied()
     }
     /// Curves for this element's press tracks ([`Self::press`], [`Self::press_fill`],
     /// [`Self::press_border`], [`Self::press_color`], [`Self::press_scale`] and
@@ -753,6 +775,18 @@ impl El {
     pub fn press_motion(mut self, down: impl Into<Anim>, up: impl Into<Anim>) -> Self {
         self.vis.cold_mut().press_motion = Some(Rc::new((down.into(), up.into())));
         self
+    }
+    /// [`Self::press_motion`] with curves a theme or token chose rather than this element: an
+    /// explicit [`Self::press_motion`] on this element (before or after) overrides it.
+    pub fn token_press_motion(mut self, down: impl Into<Anim>, up: impl Into<Anim>) -> Self {
+        if self.vis.press_motion.is_none() {
+            self.vis.cold_mut().press_motion = Some(Rc::new((down.into(), up.into())));
+        }
+        self
+    }
+    /// The pair set by [`Self::press_motion`] or [`Self::token_press_motion`].
+    pub fn press_motion_curves(&self) -> Option<(Anim, Anim)> {
+        self.vis.press_motion.as_deref().copied()
     }
     /// Default hover curves for this element and everything below it: any hover track (an
     /// element with [`Self::hover`] or [`Self::hover_group`]) without its own

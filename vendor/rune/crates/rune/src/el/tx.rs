@@ -7,11 +7,14 @@ use rune_motion::{Anim, Spring};
 use crate::el::*;
 
 mod elements;
+mod hover;
 mod keys;
 mod pick;
 mod press;
 mod rects;
 mod scroll;
+
+pub(crate) use hover::{HoverSnapshot, innermost_key as innermost_hover_key};
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +41,8 @@ pub struct Tx {
     pub(crate) focused_path: Option<String>,
     /// Focused inline link id (when focus sits on a [`Link`](crate::Link)), for [`Tx::focus_within`].
     pub(crate) focused_link: Option<String>,
+    /// Hovered element(s) and link snapshot, for [`Tx::hovered`] and [`Tx::is_hovered`].
+    pub(crate) hover: Option<Rc<HoverSnapshot>>,
     /// What this change does with motion ([`Tx::instant`], [`Tx::animated`], [`Tx::settle`]).
     pub(crate) commit: Commit,
     /// The motion this change's layout moves on ([`Tx::motion`], [`Tx::motion_curve`]).
@@ -87,6 +92,8 @@ pub struct Tx {
     /// `Tx::request_poll`: asks for another `poll` round in this frame (or a wake on the next
     /// turn when called outside a frame, such as from `AppHandle::update`).
     pub(crate) request_poll: bool,
+    /// `Tx::request_urgent_frame`: arms one-shot urgent frame admission on macOS.
+    pub(crate) urgent_frame: bool,
     pub(crate) shell: Option<Shell>,
     /// User-initiated close request (macOS unhandled ⌘W / Window › Close, assistive activation of
     /// the custom caption close button): routes through `App::on_close_request` instead of
@@ -103,6 +110,16 @@ pub struct Tx {
     pub(crate) drop_point: Option<PointerEvent>,
     /// `Tx::drag_paths`.
     pub(crate) drag_paths: Option<Rc<[std::path::PathBuf]>>,
+    /// `Tx::drag_mods`.
+    pub(crate) drag_mods: crate::Mods,
+    /// `Tx::drag_operations`.
+    pub(crate) drag_operations: crate::DragOperations,
+    /// `Tx::drop_operation`.
+    pub(crate) drop_operation: Option<crate::DragOperation>,
+    /// `Tx::set_drop_operation`: `Some(op)` overrides the hovered target's drop operation.
+    pub(crate) drop_op_set: Option<Option<crate::DragOperation>>,
+    /// `Tx::set_drop_description`: `Some(desc)` overrides the hovered target's drop description.
+    pub(crate) drop_desc_set: Option<Option<crate::el::DropDescription>>,
     pub(crate) title: Option<String>,
     pub(crate) color_scheme: Option<crate::ColorScheme>,
     pub(crate) window_backdrop: Option<crate::WindowBackdrop>,
@@ -458,6 +475,20 @@ impl Tx {
         #[cfg(feature = "frame-profile")]
         crate::frame::live_log::waker(std::panic::Location::caller(), std::time::Duration::ZERO);
         self.request_poll = true;
+    }
+
+    /// Arms one-shot urgent frame admission on macOS so the next drawn frame may bypass
+    /// display-link `Wait` once by advancing its target to now.
+    ///
+    /// Use this from [`AppHandle::update_if`](crate::AppHandle::update_if),
+    /// [`OverlayHandle::update_if`](crate::OverlayHandle::update_if), or a handler when
+    /// authoritative state changed and waiting another display interval adds visible latency.
+    /// Duplicate requests before that frame claims pacing coalesce into one admission; normal
+    /// display-link pacing resumes immediately after (even if drawable acquisition or
+    /// presentation fails), and calls during a frame already being built are consumed by that
+    /// frame. No-op for pacing off macOS.
+    pub fn request_urgent_frame(&mut self) {
+        self.urgent_frame = true;
     }
 
     /// The window's logical clock in seconds as this handler or poll runs: the `clock` `poll`

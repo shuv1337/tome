@@ -1,4 +1,4 @@
-//! GPU resource preparation, Windows partial damage planning, compositor/UI encoding,
+//! GPU resource preparation, partial damage planning, compositor/UI encoding,
 //! presentation and `frame-profile` live-log stamping for [`super::Host`].
 
 #[cfg(any(target_os = "macos", feature = "frame-profile"))]
@@ -7,9 +7,11 @@ use super::{CompositorFrame, Host};
 use crate::frame::host_step::{
     RenderPrep, StepInfo, create_frame_encoder, draw_ui, prepare_gpu_resources_with,
 };
+use crate::frame::stage::{FrameStage, StageGuard};
 use crate::time::Instant;
+use crate::window::surface::damage;
 #[cfg(target_os = "windows")]
-use crate::window::win32::{damage, handover};
+use crate::window::win32::handover;
 
 /// First frame encoded mark (`crate::marks`).
 static FIRST_ENCODED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -20,9 +22,8 @@ pub(super) struct PreparedWindowFrame {
     pub(super) encoder: wgpu::CommandEncoder,
     pub(super) target_format: wgpu::TextureFormat,
     pub(super) size: (u32, u32),
-    #[cfg(target_os = "windows")]
     pub(super) part: Option<Vec<[i32; 4]>>,
-    #[cfg(target_os = "windows")]
+    #[cfg_attr(not(any(target_os = "windows", feature = "frame-profile")), allow(dead_code))]
     pub(super) present_rect: Option<Vec<[i32; 4]>>,
 }
 
@@ -118,7 +119,6 @@ impl FrameProfile {
         let _ = why;
     }
 
-    #[cfg(target_os = "windows")]
     #[inline]
     pub(in crate::window) fn set_whole_why(&mut self, why: &'static str) {
         #[cfg(feature = "frame-profile")]
@@ -141,15 +141,9 @@ impl FrameProfile {
         host: &mut Host,
         animating: bool,
         looped: Option<&Vec<u32>>,
-        #[cfg(target_os = "windows")]
         damage: Option<Vec<[i32; 4]>>,
     ) {
-        #[cfg(target_os = "windows")]
-        let damage_seen = host.win.as_ref().and_then(|l| l.native.damage.seen);
-        #[cfg(not(target_os = "windows"))]
-        let damage_seen = None;
-        #[cfg(not(target_os = "windows"))]
-        let damage = None;
+        let damage_seen = host.win.as_ref().and_then(|l| l.damage.seen);
         self.build_frame_core(host.app.rt_mut(), damage_seen, animating, looped, damage);
     }
 
@@ -240,6 +234,7 @@ pub(super) fn prepare_window_render(
     profile: &mut FrameProfile,
     info: &mut StepInfo,
 ) -> RenderPrep<PreparedWindowFrame> {
+    let _upload = StageGuard::enter(FrameStage::Upload);
     let (Some(l), Some((gpu, renderer))) = (host.win.as_mut(), host.gpu.as_mut()) else {
         unreachable!("window and gpu live across frame");
     };
@@ -255,7 +250,6 @@ pub(super) fn prepare_window_render(
         crate::window::surface::corners::prepare(&mut l.corners, &gpu.device, &gpu.queue, size, target_format, corners);
     }
     // An image's pixels changed where its instances didn't: the whole frame draws (`damage`).
-    #[cfg(target_os = "windows")]
     let images_changed = host.app.rt().images.pages.iter().any(|p| p.dirty.is_some());
     {
         let rt = host.app.rt_mut();
@@ -284,37 +278,49 @@ pub(super) fn prepare_window_render(
     }
     profile.mark_uploaded();
     let encoder = create_frame_encoder(gpu);
-    // Only what changed is redrawn and presented (`damage`): the renderer's `draw` takes the
-    // armed rectangles when nothing but the instances draws there, a compositor's
+    // Only what changed is redrawn (and on Windows, presented) (`damage`): the renderer's `draw`
+    // takes the armed rectangles when nothing but the instances draws there, a compositor's
     // `Frame::draw_ui` included. A loop-only frame knows what changed.
-    #[cfg(target_os = "windows")]
     let part = {
         let rt = host.app.rt();
-        let whole = if l.alpha.is_some() { Some("alpha") } else if images_changed { Some("image") }
-            else if !l.config.usage.contains(wgpu::TextureUsages::COPY_DST) { Some("no copies") } else { None };
+        let copy_dst = l.config.usage.contains(wgpu::TextureUsages::COPY_DST);
+        let whole = if l.alpha.is_some() {
+            Some("alpha")
+        } else if images_changed {
+            Some("image")
+        } else if host.app.compositor_draws_own() {
+            Some("compositor")
+        } else {
+            None
+        };
         // A new swap chain (`rebind_alpha`, a replaced surface, any configure: a resize, a blend
         // switch, `acquire` retrying an outdated surface) draws its first frame whole, through
         // `plan`, even when only a loop asked for it (the step has run; the frame draws it whole).
         let swap = l.surface.as_ref().map_or(0, crate::window::surface::configure::generation);
         let atlas = damage::GlyphAtlas::of(&rt.text.atlas);
-        let loop_ok = looped.is_none_or(|p| match l.native.damage.can_patch_loop(&rt.instances, p, size, rt.clear_color(), swap, atlas) {
-            Ok(()) => true,
-            Err(why) => { profile.set_loop_why(why); false }
-        });
-        let armed = looped.map(Vec::as_slice).filter(|_| whole.is_none() && loop_ok).and_then(|p| {
-            match renderer.arm_loop(&gpu.device, &gpu.queue, rt.paint_count(), &rt.instances, p, rt.clear_color(), size, l.config.format) {
-                Ok(rects) => Some((p, rects)),
-                Err(why) => { profile.set_loop_why(why); None }
-            }
-        });
+        #[cfg(target_os = "windows")]
+        let armed = {
+            let loop_ok = looped.is_none_or(|p| match l.damage.can_patch_loop(&rt.instances, p, size, rt.clear_color(), swap, atlas) {
+                Ok(()) => true,
+                Err(why) => { profile.set_loop_why(why); false }
+            });
+            looped.map(Vec::as_slice).filter(|_| whole.is_none() && loop_ok).and_then(|p| {
+                match renderer.arm_loop(&gpu.device, &gpu.queue, rt.paint_count(), &rt.instances, p, rt.clear_color(), size, l.config.format, copy_dst) {
+                    Ok(rects) => Some((p, rects)),
+                    Err(why) => { profile.set_loop_why(why); None }
+                }
+            })
+        };
+        #[cfg(not(target_os = "windows"))]
+        let armed: Option<(&[u32], Vec<[i32; 4]>)> = None;
         if let Some((p, present)) = armed {
-            l.native.damage.patched(&rt.instances, p);
+            l.damage.patched(&rt.instances, p);
             Some(present)
         } else {
-            match l.native.damage.plan(&rt.instances, size, rt.clear_color(), swap, atlas, whole.is_none()) {
+            match l.damage.plan(&rt.instances, size, rt.clear_color(), swap, atlas, whole.is_none()) {
                 damage::Plan::All(why) => { profile.set_whole_why(whole.unwrap_or(why)); None }
                 damage::Plan::Part { draw, present } => {
-                    renderer.arm_damage(&gpu.device, &gpu.queue, &draw, rt.clear_color(), size, l.config.format);
+                    renderer.arm_damage(&gpu.device, &gpu.queue, &draw, rt.clear_color(), size, l.config.format, copy_dst);
                     Some(present)
                 }
             }
@@ -326,9 +332,7 @@ pub(super) fn prepare_window_render(
         encoder,
         target_format,
         size,
-        #[cfg(target_os = "windows")]
         part,
-        #[cfg(target_os = "windows")]
         present_rect: None,
     })
 }
@@ -340,6 +344,7 @@ pub(super) fn render_window_frame(
     profile: &mut FrameProfile,
     info: &StepInfo,
 ) -> bool {
+    let _encode = StageGuard::enter(FrameStage::Encode);
     if host.poll_gpu_loss() { return false; }
     let (Some(l), Some((gpu, renderer))) = (host.win.as_mut(), host.gpu.as_mut()) else { return false };
     let target = l.alpha.as_ref().map_or(&prepared.view, |a| &a.view);
@@ -366,7 +371,6 @@ pub(super) fn render_window_frame(
     // frame that bypassed it (e.g. a native surface whose pixels `Damage::plan` does not track),
     // so it must present the whole window instead of stamping partial dirty rects over the old
     // front buffer.
-    #[cfg(target_os = "windows")]
     match (renderer.damage_drawn(), prepared.part.take()) {
         (Ok(crate::render::KeptDraw::Partial), part) => prepared.present_rect = part,
         (Ok(crate::render::KeptDraw::Whole), Some(_)) => profile.set_whole_why("kept behind"),
@@ -390,6 +394,8 @@ pub(super) fn submit_and_present_window(
     looped: Option<&Vec<u32>>,
     profile: &mut FrameProfile,
     encoded: &mut Option<Instant>,
+    drawable: &mut Option<u64>,
+    present_returned: &mut Option<Instant>,
     info: &StepInfo,
 ) -> Instant {
     // macOS: the first frame of a window already on screen is taken as finished when it is
@@ -407,7 +413,7 @@ pub(super) fn submit_and_present_window(
         view,
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         mut encoder,
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", feature = "frame-profile"))]
         present_rect,
         ..
     } = prepared;
@@ -430,7 +436,10 @@ pub(super) fn submit_and_present_window(
         host.note_frame_texture_released();
         return crate::time::now();
     };
-    renderer.submit(&gpu.queue, encoder);
+    {
+        let _submit = StageGuard::enter(FrameStage::Submit);
+        renderer.submit(&gpu.queue, encoder);
+    }
     // Drop the view before checking/presenting; never call `pre_present_notify()` (which arms an
     // unfulfillable Wayland frame callback) or `queue.present()` on a lost/latched device under
     // either `Terminal` or `Recover`.
@@ -450,6 +459,7 @@ pub(super) fn submit_and_present_window(
     profile.mark_submitted();
     crate::marks::mark_once(&FIRST_ENCODED, "frame.first.encoded");
     *encoded = host.frame_reports.stamp();
+    let mut present_stage = StageGuard::enter(FrameStage::Present);
     l.window.pre_present_notify();
     #[cfg(target_os = "macos")]
     {
@@ -477,6 +487,15 @@ pub(super) fn submit_and_present_window(
             false,
         );
     }
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    if host.wayland
+        && host.frame_presented.wanted()
+        && let Some(wp) = l.native.wayland_present.as_mut()
+    {
+        *drawable = wp.request_feedback();
+    }
+    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
+    let _ = drawable;
     #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
     let materials_ok = {
         let rt = host.app.rt();
@@ -489,8 +508,10 @@ pub(super) fn submit_and_present_window(
     };
     #[cfg(not(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material"))))]
     gpu.queue.present(frame);
+    present_stage.end();
     // `frame` has been consumed by `queue.present`: mark released before any post-present polls.
     host.note_frame_texture_released();
+    *present_returned = host.frame_reports.stamp();
     let (Some(l), Some((gpu, renderer))) = (host.win.as_mut(), host.gpu.as_mut()) else {
         return crate::time::now();
     };
@@ -504,6 +525,14 @@ pub(super) fn submit_and_present_window(
     crate::window::linux::handover::handed(l, gpu, readback);
     #[cfg(target_os = "windows")]
     l.native.slot.presented();
+    #[cfg(target_os = "windows")]
+    if host.frame_presented.wanted()
+        && !gpu.is_lost()
+        && let Some(surface) = l.surface.as_ref()
+    {
+        let hz = super::draw::display_hz(l);
+        *drawable = l.native.dxgi_present.record_present(surface, crate::time::now(), hz);
+    }
     // A swap chain made again on a handed-over window's visual takes over now (`cpu_frame`).
     #[cfg(target_os = "windows")]
     if matches!(l.native.mode, handover::SurfaceMode::Rebinding { .. }) {
@@ -540,10 +569,16 @@ pub(super) fn submit_and_present_window(
         #[cfg(target_os = "windows")]
         crate::platform::win32::unidle_d3d_threads_soon();
     }
-    // The window shows once the GPU has finished the frame it presents.
+    // The window shows once the GPU has finished a frame matching its current size.
     #[cfg(target_os = "windows")]
-    if l.native.cloak.held()
-        && rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).is_ok()
+    if l.native.cloak.held() && {
+        let inner = l.window.inner_size();
+        crate::platform::win32::Cloak::size_matches(
+            (l.config.width, l.config.height),
+            (inner.width, inner.height),
+            crate::window::surface::max_surface_dim(Some(gpu)),
+        )
+    } && rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).is_ok()
         && !gpu.is_lost()
     {
         l.native.cloak.lift(&l.window);
@@ -565,7 +600,6 @@ pub(super) fn submit_and_present_window(
         host,
         info.animating,
         looped,
-        #[cfg(target_os = "windows")]
         present_rect,
     );
     #[cfg(not(feature = "frame-profile"))]

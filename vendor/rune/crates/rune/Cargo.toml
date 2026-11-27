@@ -7,7 +7,7 @@ description = "GPU-rendered Rust UI framework (wgpu, winit) with keyed element t
 autotests = false
 
 [features]
-default = ["accessibility", "dbus", "embedded-fonts", "hunspell", "metal-backend", "ogg-audio", "svg", "wayland-csd-title", "rune-gpu/default", "rune-image/default", "rune-media/default", "rune-text/default"]
+default = ["accessibility", "dbus", "embedded-fonts", "hunspell", "metal-backend", "ogg-audio", "png", "svg", "wayland-csd-title", "rune-gpu/default", "rune-image/default", "rune-media/default", "rune-text/default"]
 # Bundle Inter (Regular, Medium, SemiBold; on web also IBM Plex Mono) as the fonts text falls back
 # to when the app registers none. Disable when AppSpec::fonts supplies the app's own fonts to omit
 # the bytes (about 1.25 MB native).
@@ -68,19 +68,26 @@ windows-system-material = [
 # decoding it in Rust (symphonia, opuscule) and handing AVPlayer the PCM. Off, those clips
 # fail at once with a clear message.
 ogg-audio = ["rune-media/ogg-audio"]
+# Web (`wasm32`): decode PNG, APNG and ICNS bytes and convert embedded ICC profiles in Rust
+# (`image/png`, `png`, `moxcms`). Off (for example with `default-features = false`), `wasm32`
+# decodes PNG and ICNS through the browser's `createImageBitmap` (with native ICC conversion),
+# encodes `ClipboardImage::from_rgba` / `DragImage::from_rgba` with a tiny stored-block PNG
+# writer, and omits `image`, `png`, `fdeflate`/`flate2`/`miniz_oxide` and `moxcms`. No effect
+# on native targets, which always link the Rust raster codecs.
+png = ["rune-image/png", "dep:image", "dep:png"]
 # SVG and SVGZ images (`ImageCache::svg`, `file`, `load_mime`, and `load` on sniffed SVG bytes), and
 # scalable Linux app icons, rasterized by resvg. Off, those images resolve to `Image::error`.
 svg = ["rune-image/svg", "rune-text/svg"]
-# AVIF images (`ImageCache::load` on AVIF bytes), decoded natively by rav1d, a Rust port of
-# dav1d; an animated AVIF shows its first frame. Building it for x86 needs NASM on the PATH for
-# rav1d's assembly. Off, AVIF bytes resolve to `Image::error`. No effect on web, where the
-# browser decodes AVIF.
+# AVIF stills (`ImageCache::load` on AVIF bytes), decoded natively by rav1d, a pure-Rust port of
+# dav1d; animated AVIF (`avis`) is rejected natively. Off, AVIF bytes resolve to `Image::error`.
+# No effect on web, where the browser decodes AVIF.
 avif = ["rune-image/avif"]
-# Linux: spell check text fields (`El::spellcheck`) against installed system Hunspell
-# dictionaries via `spellbook` (MPL-2.0) and `unicode-segmentation`. Off (for example with
-# `default-features = false` or a permissive-only licence policy), `spellbook` is not compiled on
-# Linux and `El::spellcheck` falls back to a no-op there. No effect on Windows (`ISpellChecker`),
-# macOS (`NSSpellChecker`), or web (which always enables `rune-spell/hunspell`).
+# Linux and web (`wasm32`): spell check text fields (`El::spellcheck`) against Hunspell
+# dictionaries via `spellbook` (MPL-2.0) and `unicode-segmentation` (installed system dictionaries
+# on Linux, fetched `spell/<tag>.aff`/`.dic` files on web). Off (for example with
+# `default-features = false` or a permissive-only licence policy), `spellbook` and the web
+# dictionary loader are not compiled and `El::spellcheck` falls back to a no-op on Linux and web.
+# No effect on Windows (`ISpellChecker`) or macOS (`NSSpellChecker`).
 hunspell = ["rune-spell/hunspell"]
 # Linux/Wayland: render window titles in `sctk-adwaita`'s client-side headerbar on compositors
 # without server-side decorations (such as GNOME), via `winit/wayland-csd-adwaita` (`ab_glyph`,
@@ -121,19 +128,19 @@ test-gpu-noop = ["wgpu/noop"]
 [dependencies]
 # The accessibility tree's types; the platform adapters below come with `accessibility`.
 accesskit = "0.25.2"
-procwatch = { version = "0.1.0", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", optional = true }
+procwatch = { version = "0.1.0", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", optional = true }
 subsecond = { version = "=0.7.10", optional = true }
 dioxus-devtools = { version = "=0.7.10", optional = true }
-rune-core = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb" }
-rune-edit = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb" }
-rune-gpu = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false }
-rune-image = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false }
-rune-media = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false }
-rune-motion = { version = "0.1.0", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb" }
-rune-spell = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false }
-rune-staging = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb" }
-rune-taffy = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb" }
-rune-text = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false }
+rune-core = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-edit = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-gpu = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-image = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-media = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-motion = { version = "0.1.0", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-spell = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
+rune-staging = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-taffy = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322" }
+rune-text = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "f1b079ccad541008073e73d0987b876f4c99c322", default-features = false }
 # Allow backend patch fixes; headless pixel equivalence guards the precompiled Metal path.
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"] }
 # Keep Wayland client-side frames/buttons even with `default-features = false`; the default
@@ -142,9 +149,7 @@ winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "
 taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout", "content_size"] }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 bytemuck = { version = "1.25", features = ["derive"] }
-png = "0.18"
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
 blake3 = "1"
 rustc-hash = "2"
 zeroize = "1.8"
@@ -156,6 +161,8 @@ unicode-segmentation = "1.13"
 libc = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18"
 pollster = "1"
 
 [target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios"), not(target_os = "android")))'.dependencies]
@@ -166,7 +173,8 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control", "image-data"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-rune-spell = { version = "0.0.1", git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93ef00782a6c7c9a672608a9ba778cdb", default-features = false, features = ["hunspell"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+png = { version = "0.18", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -211,7 +219,7 @@ xkbcommon = "0.9"
 # DirectComposition handover (`platform::win32::dcomp_handover`), OLE drag and drop
 # (`drag_out::windows`, `platform::win32::drop_target`), jump lists and the taskbar button's
 # progress and badge (`platform::win32::{jump_list,taskbar}`).
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Foundation", "UI_ViewManagement", "Win32_Foundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D12", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 # `#[windows::core::implement]` (the OLE drop target, `platform::win32::drop_target`) names this crate.
 windows-core = "0.62"
 # D3D12 alone: a machine without a hardware D3D12 adapter draws on WARP, D3D12's own software
@@ -313,6 +321,9 @@ name = "installed_families"
 
 [[test]]
 name = "measure_scope"
+
+[[test]]
+name = "setup_measure"
 
 [[test]]
 name = "pixels_streaming"

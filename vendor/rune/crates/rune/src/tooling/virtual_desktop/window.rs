@@ -299,11 +299,10 @@ impl Window {
         let size = own.size.unwrap_or(spec.size);
         let min_size = spec.min_size;
         let dark = own.theme.as_deref() != Some("light");
-        let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
+        let mut rt = crate::tooling::runtime_for_configured(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}), Some(runtime));
         if let Some(attach) = attach_playground {
             attach(&mut rt, playground, &spec, own.playground.clone(), own.variant.clone(), false);
         }
-        rt.configure(runtime);
         let (shared_core, shortcuts_core) = (shared.core.clone(), shared.shortcuts.core.clone());
         let typed = Box::new(TypedDesktopApp { rt, shared, comp, on_close_request, on_quit_request, on_close, on_reopen });
         Self::from_app(typed, WindowInit {
@@ -517,6 +516,7 @@ impl Member for Window {
         let _receiving = self.shortcuts.receiving();
         let requests = self.app.drain_updates(&mut self.menus);
         if let Some(p) = requests.position { self.move_to(desktop.to_points(p)); }
+        if let Some((x, y)) = requests.logical_position { self.move_to((x as f32, y as f32)); }
         if let Some(place) = &requests.place { self.place(desktop, place, t); }
         if let Some(request) = requests.window { self.request(request, &mut changes); }
         if requests.activation == Some(crate::app::Activation::Focus) && self.life.shown() { changes.front = true; changes.keys = true; }
@@ -527,6 +527,7 @@ impl Member for Window {
                 WakeEvent::Window(_, request) => self.request(request, &mut changes),
                 WakeEvent::Place(_, place) => self.place(desktop, &place, t),
                 WakeEvent::Position(_, p) => self.move_to(desktop.to_points(p)),
+                WakeEvent::LogicalPosition(_, (x, y)) => self.move_to((x as f32, y as f32)),
                 WakeEvent::Focus(_) if self.life.shown() => { changes.front = true; changes.keys = true; }
                 WakeEvent::Frame(_, mut request) => {
                     let rt = self.app.rt_mut();

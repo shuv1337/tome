@@ -47,6 +47,28 @@ pub fn commit_generation() -> u64 {
     COMMITS.get()
 }
 
+/// Primary pointer capability and hover mode (`Cx::hover_none`, `Cx::touch_controls`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PrimaryPointer {
+    /// Fine/hover-capable primary pointer (mouse, trackpad, pen/stylus).
+    #[default]
+    Hover,
+    /// Primary pointer cannot hover, but is not coarse touch (web `(hover: none)` without `(pointer: coarse)`).
+    #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+    NoHover,
+    /// Coarse touch primary pointer that cannot hover (`Cx::touch_controls` and `Cx::hover_none`).
+    Touch,
+}
+
+impl PrimaryPointer {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[inline]
+    pub(crate) const fn hover_none(self) -> bool { !matches!(self, Self::Hover) }
+
+    #[inline]
+    pub(crate) const fn touch_controls(self) -> bool { matches!(self, Self::Touch) }
+}
+
 /// Type-erased view context owned inside [`Cx<S>`] and constructed by non-generic
 /// [`Measurement`](super::commit::Measurement).
 #[derive(Clone)]
@@ -68,6 +90,8 @@ pub(crate) struct CxCore {
     pub(super) system_accent: crate::SystemAccent,
     pub(super) system_contrast: Option<crate::SystemContrast>,
     pub(super) system_increased_contrast: bool,
+    pub(super) system_text_scale: f32,
+    pub(super) system_reduced_transparency: bool,
     pub(super) system_scroll_bars: crate::platform::scroll_bars::SystemScrollBars,
     pub(super) system_languages: Option<Rc<[String]>>,
     pub(super) system_reduced_motion: bool,
@@ -80,6 +104,9 @@ pub(crate) struct CxCore {
     pub(super) caret_read: std::cell::Cell<bool>,
     pub(super) wm_state: crate::WindowManagerState,
     pub(super) wm_state_read: std::cell::Cell<bool>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(super) primary_pointer: PrimaryPointer,
+    pub(super) primary_pointer_read: std::cell::Cell<bool>,
     pub(super) safe_area: [f32; 4],
     pub(super) layout: layout_read::LayoutRects,
     pub(super) layout_reads: std::cell::RefCell<layout_read::LayoutReads>,
@@ -102,6 +129,7 @@ impl CxCore {
         self.defaults = other.defaults;
         self.caret_read.set(self.caret_read.get() || other.caret_read.get());
         self.wm_state_read.set(self.wm_state_read.get() || other.wm_state_read.get());
+        self.primary_pointer_read.set(self.primary_pointer_read.get() || other.primary_pointer_read.get());
         let mut reads = self.layout_reads.borrow_mut();
         for read in other.layout_reads.into_inner() {
             layout_read::note_read_at(&mut reads, &read.key, read.same, read.at);
@@ -152,17 +180,25 @@ impl CxCore {
         #[cfg(target_arch = "wasm32")]
         { crate::platform::web::hover_none() }
         #[cfg(not(target_arch = "wasm32"))]
-        { false }
+        {
+            self.primary_pointer_read.set(true);
+            self.primary_pointer.hover_none()
+        }
     }
     pub(crate) fn touch_controls(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         { crate::platform::web::touch_controls() }
         #[cfg(not(target_arch = "wasm32"))]
-        { false }
+        {
+            self.primary_pointer_read.set(true);
+            self.primary_pointer.touch_controls()
+        }
     }
     pub(crate) fn system_contrast(&self) -> Option<crate::SystemContrast> { self.system_contrast }
     pub(crate) fn system_increased_contrast(&self) -> bool { self.system_increased_contrast }
+    pub(crate) fn system_reduced_transparency(&self) -> bool { self.system_reduced_transparency }
     pub(crate) fn system_reduced_motion(&self) -> bool { self.system_reduced_motion }
+    pub(crate) fn system_text_scale(&self) -> f32 { self.system_text_scale }
     pub(crate) fn pointer_locked(&self) -> bool { self.pointer_locked }
     pub(crate) fn system_languages(&self) -> &[String] {
         match &self.system_languages {
@@ -582,13 +618,22 @@ impl<S> Cx<S> {
     /// can extend to the screen edges.
     #[inline(always)]
     pub fn safe_area(&self) -> [f32; 4] { self.core.safe_area() }
-    /// The primary pointer can't hover: a browser's `(hover: none)`, a phone's or tablet's touch
-    /// screen. What a mouse would reveal on hover (a code block's Copy, a row's actions) should
-    /// show without it. False natively. A change re-runs the view.
+    /// The primary pointer can't hover: on the web, the browser's `(hover: none)` media query;
+    /// natively, tracks the window's primary pointer—starting `true` on touch-first postures
+    /// (Windows slate mode or touchscreen without a mouse, and iOS), switching to `true` on
+    /// finger touch input, and returning to `false` on mouse, trackpad, or pen input (or when
+    /// leaving tablet mode). What a mouse would reveal on hover (a code block's Copy, a row's
+    /// actions) should show without it. Defaults to `false` in headless runs; a change re-runs
+    /// the view and its memos.
     #[inline(always)]
     pub fn hover_none(&self) -> bool { self.core.hover_none() }
-    /// A page's primary pointer is coarse and can't hover. Use this for a phone or tablet's
-    /// controls rather than the viewport width: a narrow window can still have a mouse.
+    /// Whether the primary pointer is coarse touch and can't hover: on the web, the browser's
+    /// `(hover: none)` and `(pointer: coarse)` media queries; natively, tracks the window's
+    /// primary pointer—starting `true` on touch-first postures (Windows slate mode or touchscreen
+    /// without a mouse, and iOS), switching to `true` on finger touch input, and returning to
+    /// `false` on mouse, trackpad, or pen input (or when leaving tablet mode). Use this for
+    /// touch-sized controls rather than viewport width: a narrow window can still have a mouse.
+    /// Defaults to `false` in headless runs; a change re-runs the view and its memos.
     #[inline(always)]
     pub fn touch_controls(&self) -> bool { self.core.touch_controls() }
     /// The system's contrast theme when one is on (Windows' Contrast themes, high contrast):
@@ -596,14 +641,33 @@ impl<S> Cx<S> {
     /// (CSS `forced-colors: active`). None otherwise. A change re-runs the view.
     #[inline(always)]
     pub fn system_contrast(&self) -> Option<crate::SystemContrast> { self.core.system_contrast() }
-    /// Whether the system asks for more contrast: macOS's Increase Contrast, or a Windows contrast
-    /// theme (when [`Self::system_contrast`] is also there). A view can draw its stronger edges for
-    /// it while keeping its own colours. A change re-runs the view.
+    /// Whether the system asks for more contrast: macOS's Increase Contrast, a Windows contrast
+    /// theme (when [`Self::system_contrast`] is also there), Linux's XDG desktop portal
+    /// `org.freedesktop.appearance` `contrast` setting (such as GNOME's High Contrast), or a
+    /// browser's `(prefers-contrast: more)` or `(forced-colors: active)` media query. A view can
+    /// draw its stronger edges for it while keeping its own colours. A change re-runs the view.
     #[inline(always)]
     pub fn system_increased_contrast(&self) -> bool { self.core.system_increased_contrast() }
+    /// Whether the system asks apps to reduce transparency: macOS's Reduce Transparency
+    /// (Accessibility > Display), Windows' Transparency effects turned off, or the browser's
+    /// `prefers-reduced-transparency: reduce`. While true, [`El::backdrop_blur`] draws only its
+    /// fill without blurring, and views can pick opaque fills instead of translucent tints. A
+    /// change re-runs the view and its memos.
+    #[inline(always)]
+    pub fn system_reduced_transparency(&self) -> bool { self.core.system_reduced_transparency() }
     /// The host's OS accessibility preference, independent of this commit's override.
     #[inline(always)]
     pub fn system_reduced_motion(&self) -> bool { self.core.system_reduced_motion() }
+    /// The system's text-size scale factor (`1.0` by default): Windows Settings > Accessibility >
+    /// Text size (`UISettings.TextScaleFactor`, `1.0..=2.25`), iOS Dynamic Type relative to the
+    /// default `Large` body size, Linux's `org.gnome.desktop.interface` `text-scaling-factor`,
+    /// and the browser's root `font-size` divided by `16px` on the web (`1.0` on macOS).
+    ///
+    /// Re-runs the view and its memos when the preference changes. Headless captures can override
+    /// it with `RUNE_TEXT_SCALE=<factor>`. Apps decide whether to pass this to [`Cx::zoom`] or
+    /// scale only their type ramp.
+    #[inline(always)]
+    pub fn system_text_scale(&self) -> f32 { self.core.system_text_scale() }
     /// Whether an element in this window currently holds pointer lock
     /// ([`El::pointer_lock`](crate::El::pointer_lock)).
     ///

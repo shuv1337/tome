@@ -415,7 +415,13 @@ impl OverlayCore {
                     let caps = super::toplevel::toplevel_capabilities(resolved);
                     self.shared.native.lock().unwrap().1 = caps;
                 }
-                _ => {}
+                _ => {
+                    if let Some(layer) = self.pending_layer.layer_mut() {
+                        layer.set_input(resolved);
+                        layer.input_regions(rt.hit_regions(), self.interactive);
+                        layer.commit();
+                    }
+                }
             }
         }
         self.publish_regions(rt);
@@ -433,14 +439,54 @@ impl OverlayCore {
 
     /// Fn changes the monitor saw since the loop last turned. A hidden overlay drops them: its
     /// hide released Fn, and it takes no keys.
+    /// Drains queued keyboard input immediately without acquiring, encoding, or presenting a
+    /// drawable when [`KeyboardDispatch::Immediate`](crate::KeyboardDispatch::Immediate) is
+    /// active for this key-taking overlay. Visual presentation still waits for normal pacing.
+    pub(super) fn dispatch_immediate_keyboard(&mut self, app: &mut dyn OverlayApp) -> bool {
+        if !self.options.keys.takes_keys() {
+            return false;
+        }
+        let policy = self.keyboard_dispatch.effective();
+        if !policy.is_immediate() || !app.rt().has_input_waiting() {
+            return false;
+        }
+        let now = crate::time::now();
+        let compositing = app.compositor_animating();
+        if !app.immediate_keyboard_step(policy, &mut self.clock, now, compositing) {
+            return false;
+        }
+        self.quiet.step(frame::QuietEvent::Forget);
+        self.dirty = true;
+        self.idle = false;
+        if let Some(backdrop) = app.rt_mut().host.window_backdrop_request.take() {
+            self.window_backdrop = backdrop;
+            self.sync_window_backdrop(app.rt_mut(), false);
+        }
+        self.take_window_requests(app.rt_mut());
+        self.clipboard.flush_core(app.rt_mut());
+        self.open_popup(app);
+        let live = self.presence.shown() && !self.presence.occluded();
+        if self.presence.shown() {
+            let _ = self.sync_ime(app);
+            self.publish_regions(app.rt());
+        }
+        crate::haptics::flush_live(app.rt_mut(), live);
+        true
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn fn_key(&mut self, app: &mut dyn OverlayApp) {
         let Some(changes) = self.surface.live().and_then(|l| l.fn_key.as_ref()).map(|f| f.take()) else { return };
         if !self.presence.shown() || !self.options.keys.takes_keys() { return; }
+        let mut queued = false;
         for pressed in changes {
-            self.dirty |= app.physical_with_fallback(crate::PhysicalInput::Key {
+            queued |= app.physical_with_fallback(crate::PhysicalInput::Key {
                 key: winit::keyboard::KeyCode::Fn, mods: crate::window::map_mods(self.mods), pressed, repeat: false, text: None, consumed_mods: Default::default(),
             }, None);
+        }
+        if queued {
+            self.dirty = true;
+            self.dispatch_immediate_keyboard(app);
         }
     }
 
@@ -449,8 +495,13 @@ impl OverlayCore {
     pub(super) fn media_keys(&mut self, app: &mut dyn OverlayApp) {
         let Some(events) = self.surface.live().and_then(|l| l.media_keys.as_ref()).map(|m| m.take()) else { return };
         if !self.presence.shown() || !self.options.keys.takes_keys() { return; }
+        let mut queued = false;
         for (decoded, mods) in events {
-            self.dirty |= app.media_key(decoded, mods);
+            queued |= app.media_key(decoded, mods);
+        }
+        if queued {
+            self.dirty = true;
+            self.dispatch_immediate_keyboard(app);
         }
     }
 
@@ -466,6 +517,7 @@ impl OverlayCore {
     pub(super) fn apply_wake_drained(&mut self, app: &mut dyn OverlayApp, woken: bool, queued: bool, updated: bool) {
         if woken { app.rt_mut().invalidate(); }
         if queued || woken { self.clipboard.flush_core(app.rt_mut()); }
+        let urgent = app.rt_mut().take_urgent_frame();
         if !woken && !updated {
             if !queued { return; }
             // A pop-up they asked for may be answered at once, running its callback: a change.
@@ -478,6 +530,14 @@ impl OverlayCore {
             self.clipboard.flush_core(app.rt_mut());
         }
         self.dirty = true; // Queued updates already invalidate the cache before polling.
+        #[cfg(target_os = "macos")]
+        if urgent && !self.frameless() && !self.backoff.waiting(crate::time::now())
+            && let Some(pacing) = self.surface.live_mut().and_then(|l| l.pacing.as_mut())
+        {
+            pacing.admit_once();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = urgent;
         if self.frameless() {
             // Register timer requests even before the first show; hidden or occluded overlays
             // don't draw.
@@ -489,6 +549,9 @@ impl OverlayCore {
     /// outstanding and the GPU device is still live, so the overlay must not acquire or present
     /// again until the compositor answers.
     pub(super) fn awaiting_layer_frame(&self) -> bool {
+        if self.has_pending_layer() {
+            return true;
+        }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         let surface_ready = match self.surface.live().map(|l| &l.backing) {
             Some(Backing::Layer(layer)) => layer.frame_ready(),
@@ -558,6 +621,7 @@ impl OverlayCore {
 
     pub(super) fn wake_due(&mut self, app: &mut dyn OverlayApp, now: Instant) {
         self.presence_due(app, now);
+        self.poll_activation_tokens(now);
         self.rest_step(app, crate::window::RestEvent::Woke { now }, now);
         self.retire.poll_due(now);
         // Paced to a frame interval: a hidden or covered overlay's poll that keeps asking for
@@ -634,12 +698,17 @@ impl OverlayCore {
 
     /// Applies requests from other threads: updates, edge, show and hide.
     pub(super) fn sync(&mut self, app: &mut dyn OverlayApp, event_loop: &ActiveEventLoop) {
+        if self.shared.is_closed() {
+            self.close_host(app);
+            return;
+        }
         if self.poll_terminal_gpu_loss(app) {
-            self.drain_tokens_none();
+            self.close_tokens();
             self.close_after_hidden(app);
             return;
         }
         self.record_wayland_display(event_loop);
+        self.poll_activation_tokens(crate::time::now());
         self.clipboard_due(app);
         if app.popup_answer(&mut self.popup) {
             self.dirty = true;
@@ -649,7 +718,7 @@ impl OverlayCore {
         self.drag_ends_due(app);
         let mut requests = std::mem::take(&mut *self.shared.requests.lock().unwrap());
         let new_after_hidden = app.take_after_hidden();
-        for reply in requests.tokens.take() { reply(self.activation_token()); }
+        self.start_tokens(requests.tokens.take(), crate::time::now());
         if let Some(input) = requests.input { self.pending_input = Some(input); }
         self.apply_input(app.rt());
         if let Some(exclude) = requests.exclude_from_capture { self.set_capture_exclusion(exclude); }
@@ -665,20 +734,24 @@ impl OverlayCore {
         }
         let reset_position = self.position_owner.apply_requests(&requests);
         let options_changed = requests.placement.is_some() || requests.display.is_some();
+        let was_shown = self.presence.shown();
+        let was_holding_keys = self.key_hold.is_held();
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         let recreate_layer = should_recreate_layer(
             &self.options.display,
             &requests,
-            matches!(self.surface.live().map(|l| &l.backing), Some(Backing::Layer(_))),
+            matches!(self.surface.live().map(|l| &l.backing), Some(Backing::Layer(_))) || self.has_pending_layer(),
         );
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        let layer_was_visible = self.presence.shown();
+        let layer_was_visible = was_shown;
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if recreate_layer { self.hide(app); }
         if let Some(placement) = requests.placement {
             self.options.placement = placement;
             #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
             if let Some(Live { backing: Backing::Layer(layer), .. }) = self.surface.live_mut() {
+                layer.set_placement(placement);
+            } else if let Some(layer) = self.pending_layer.layer_mut() {
                 layer.set_placement(placement);
             }
         }
@@ -718,6 +791,9 @@ impl OverlayCore {
                     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
                     Some(Backing::Xwayland(surface)) => surface.place(self.at, &self.options),
                     None => {
+                        if self.has_pending_layer() {
+                            self.resize_pending_layer();
+                        }
                         #[cfg(target_os = "windows")]
                         if let Some(w) = self.cpu.as_ref().map(|c| c.window.clone()) {
                             self.place_window(app.rt_mut(), event_loop, &w);
@@ -741,15 +817,22 @@ impl OverlayCore {
             self.window_backdrop = backdrop;
             self.sync_window_backdrop(app.rt_mut(), false);
         }
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        let had_live_layer = matches!(self.surface.live().map(|l| &l.backing), Some(Backing::Layer(_))) || self.has_pending_layer();
+        let will_show = keys::will_be_shown(was_shown, requests.visibility);
+        self.key_hold = keys::next_key_hold(was_holding_keys, will_show, self.options.keys, requests.keys);
         match requests.visibility {
             Some(Visibility::Show(fade)) => self.show_fading(app, event_loop, fade),
             Some(Visibility::Hide(fade)) => self.hide_fading(app, fade),
             None => {}
         }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        if recreate_layer && self.surface.live().is_none() {
+        if recreate_layer && self.surface.live().is_none() && !self.has_pending_layer() {
             if layer_was_visible && !matches!(requests.visibility, Some(Visibility::Hide(_))) { self.show_fading(app, event_loop, Duration::ZERO); }
             else if self.options.prewarm { self.prepare(app, event_loop, false); }
+        }
+        if !self.presence.shown() {
+            self.key_hold.step(keys::KeyHoldEvent::Release);
         }
         if new_after_hidden {
             self.after_hidden_queued(app);
@@ -772,12 +855,19 @@ impl OverlayCore {
         if requests.keys == Some(KeyRequest::Take) && self.presence.shown() && self.options.keys.takes_keys()
             && let Some(panel) = &self.panel { panel.request_keys(); }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        if requests.keys == Some(KeyRequest::Take) && self.presence.shown() && self.options.keys.takes_keys()
-            && let Some(Live { backing: Backing::Layer(layer), .. }) = self.surface.live_mut()
-            && layer.request_keys() { self.surface_input(app, crate::platform::layer_shell::Input::Focus(true)); }
-        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-        if requests.keys == Some(KeyRequest::Release) && let Some(Live { backing: Backing::Layer(layer), .. }) = self.surface.live_mut()
-            && layer.release_keys() { self.surface_input(app, crate::platform::layer_shell::Input::Focus(false)); }
+        if let Some(req) = keys::should_apply_layer_key_request(had_live_layer, requests.keys, self.presence.shown(), self.options.keys) {
+            let layer = match self.surface.live_mut() {
+                Some(Live { backing: Backing::Layer(layer), .. }) => Some(layer),
+                _ => self.pending_layer.layer_mut(),
+            };
+            let focus = layer.and_then(|layer| match req {
+                KeyRequest::Take => layer.request_keys().then_some(true),
+                KeyRequest::Release => layer.release_keys().then_some(false),
+            });
+            if let Some(focused) = focus {
+                self.surface_input(app, crate::platform::layer_shell::Input::Focus(focused));
+            }
+        }
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if requests.keys == Some(KeyRequest::Take) && self.presence.shown() && self.options.keys.takes_keys()
             && let Some(x11) = &self.x11 { x11.request_keys(); }

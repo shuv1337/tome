@@ -187,7 +187,8 @@ impl Host {
         frame: Option<crate::platform::win32::CustomFrame>, cloak: crate::platform::win32::Cloak, focus: bool, open_as: crate::windows::OpenAs, built: bool) -> Result<(), String> {
         // Maximizing (or full screen) shows a window: cloaked, so it shows only with its frame.
         if open_as != crate::windows::OpenAs::Normal {
-            cloak.hold(&window, crate::time::now() + win::READY_FALLBACK, focus);
+            let until = crate::time::now() + win::READY_FALLBACK;
+            if open_as.full_screens() { cloak.hold_without_transitions(&window, until, focus); } else { cloak.hold(&window, until, focus); }
             window.set_visible(true);
             chrome::open_as(&window, open_as);
             crate::platform::win32::apply_window_styles(&window, &self.windows_window);
@@ -244,6 +245,7 @@ impl Host {
             corners: None,
             timer_frame: TimerFrame::default(),
             loop_frame: LoopFrame::default(),
+            damage: Default::default(),
             presented: None,
             covered_draw: CoveredDraw::Current,
             redraw: std::cell::Cell::new(Redraw::Idle),
@@ -285,6 +287,8 @@ impl Host {
     /// changed, and only those rectangles go to the window. While handing over, the GPU draws the
     /// same instances too.
     pub(in crate::window) fn draw_cpu(&mut self, resizing: bool) {
+        let seq = self.frame_reports.next_seq();
+        let _stage_scope = self.observability.scope_stages(seq);
         let mut frame = CpuWindowFrame {
             host: self,
             resizing,
@@ -292,6 +296,7 @@ impl Host {
             hidden: false,
             now: None,
             encoded: None,
+            redraw_stage: crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Redraw),
         };
         host_step::run(&mut frame);
     }
@@ -304,6 +309,7 @@ struct CpuWindowFrame<'a> {
     hidden: bool,
     now: Option<Instant>,
     encoded: Option<Instant>,
+    redraw_stage: crate::frame::stage::StageGuard,
 }
 
 impl FrameHost for CpuWindowFrame<'_> {
@@ -338,6 +344,7 @@ impl FrameHost for CpuWindowFrame<'_> {
         let cover_owed = !l.minimized() && l.covered_draw.drawing();
         let covered = !owed && !handing && !cover_owed && ((!launcher && !self.host.life.uncovered()) || l.minimized());
         if covered {
+            self.redraw_stage.end();
             self.host.covered_frame();
             return Gate::Skip;
         }
@@ -371,6 +378,7 @@ impl FrameHost for CpuWindowFrame<'_> {
     fn acquire(&mut self) -> Acquire<()> { Acquire::Ready(()) }
 
     fn step_runtime(&mut self) -> StepInfo {
+        let _runtime = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Runtime);
         let now = crate::time::now();
         self.now = Some(now);
         if self.hidden && self.host.win.as_ref().is_some_and(|l| l.first_frame.settles()) {
@@ -410,7 +418,12 @@ impl FrameHost for CpuWindowFrame<'_> {
         let rt = self.host.app.rt_mut();
         let handing_over = matches!(l.native.mode, SurfaceMode::HandingOver { .. });
         let (SurfaceMode::Cpu { cpu, .. } | SurfaceMode::HandingOver { cpu, .. }) = &mut l.native.mode else { return RenderPrep::Abort };
-        cpu.painter.fill_masks(&mut rt.text.atlas);
+        if rt.text.atlas.has_pending_fills() {
+            let _atlas = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::GlyphAtlas);
+            cpu.painter.fill_masks(&mut rt.text.atlas);
+        } else {
+            cpu.painter.fill_masks(&mut rt.text.atlas);
+        }
         crate::marks::mark_once(&FIRST_MASKS, "frame.first.masks");
         let scene = Scene::new(&rt.instances, &rt.text.atlas, &rt.images, (width, height), rt.clear_color())
             .srgb_blend(rt.srgb_blend())
@@ -426,7 +439,10 @@ impl FrameHost for CpuWindowFrame<'_> {
             return RenderPrep::Abort;
         };
         let stride = dib.stride();
-        let paint_result = painter.paint(&scene, &mut Target::with_stride(dib.bytes(), width, height, stride));
+        let paint_result = {
+            let _encode = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Encode);
+            painter.paint(&scene, &mut Target::with_stride(dib.bytes(), width, height, stride))
+        };
         match paint_result {
             Ok(painted) => {
                 cpu.degraded = false;
@@ -481,6 +497,7 @@ impl FrameHost for CpuWindowFrame<'_> {
         let Some(l) = self.host.win.as_mut() else { return false };
         let (width, height) = (l.config.width, l.config.height);
         let (SurfaceMode::Cpu { cpu, .. } | SurfaceMode::HandingOver { cpu, .. }) = &mut l.native.mode else { return false };
+        let _present = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::Present);
         if let Buffer::Ready(dib) = &cpu.buffer {
             cpu.shown = match std::mem::replace(&mut cpu.shown, Shown::Nothing) {
                 Shown::Copied(size) => {
@@ -509,6 +526,12 @@ impl FrameHost for CpuWindowFrame<'_> {
         } else if l.window.is_visible() == Some(true) {
             // A frame after the show that came before the first copy.
             copy_first(cpu, &l.window, (width, height));
+            if l.native.cloak.held() {
+                let inner = l.window.inner_size();
+                if crate::platform::win32::Cloak::size_matches((width, height), (inner.width, inner.height), crate::window::surface::max_surface_dim(None)) {
+                    l.native.cloak.lift(&l.window);
+                }
+            }
         }
         false
     }
@@ -539,7 +562,8 @@ impl FrameHost for CpuWindowFrame<'_> {
         let now = self.now.unwrap_or(submitted);
         self.host.meter.presented();
         crate::haptics::flush_live(self.host.app.rt_mut(), false);
-        self.host.frame_reports.drawn(self.encoded, None, now, info.update_ms);
+        self.redraw_stage.end();
+        self.host.frame_reports.drawn_with_present(self.encoded, self.encoded, None, now, info.update_ms, false);
         self.host.app.inspect_frame();
         let Some(l) = self.host.win.as_mut() else { return };
         let next_tick = l.next_tick(now).filter(|_| !self.hidden);

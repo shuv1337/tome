@@ -43,21 +43,51 @@ fn test_runtime() -> (Runtime<State>, Arc<SharedCore>, Arc<AtomicUsize>) {
 fn motion_contrast_languages_and_focus_short_circuit_unchanged_values() {
     let (mut rt, _, _) = test_runtime();
 
-    // Defaults: reduced_motion = false, contrast = None.
+    // Defaults: reduced_motion = false, reduced_transparency = false, contrast = None.
     assert!(!apply_motion(rt.core_mut(), &json!({ "kind": "motion", "reduced": false })));
     assert!(apply_motion(rt.core_mut(), &json!({ "kind": "motion", "reduced": true })));
     assert!(!apply_motion(rt.core_mut(), &json!({ "kind": "motion", "reduced": true })));
     assert!(apply_motion(rt.core_mut(), &json!({ "kind": "motion", "reduced": false })));
 
+    assert!(!apply_transparency(rt.core_mut(), &json!({ "kind": "transparency", "reduced": false })));
+    assert!(apply_transparency(rt.core_mut(), &json!({ "kind": "transparency", "reduced": true })));
+    assert!(!apply_transparency(rt.core_mut(), &json!({ "kind": "transparency", "reduced": true })));
+    assert!(apply_transparency(rt.core_mut(), &json!({ "kind": "transparency", "reduced": false })));
+
     let colors = json!([
         [0, 0, 0], [255, 255, 255], [0, 120, 215], [255, 255, 255],
         [128, 128, 128], [32, 32, 32], [255, 255, 255], [80, 160, 255]
     ]);
-    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null })));
+    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": false })));
+    assert!(!rt.core().system_increased_contrast());
+    // Forced colors sets both system_contrast and system_increased_contrast, even if "increased" is omitted.
     assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": colors })));
-    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": colors })));
-    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null })));
-    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null })));
+    assert!(rt.core().system_contrast().is_some());
+    assert!(rt.core().system_increased_contrast());
+    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": colors, "increased": true })));
+    // Leaving forced-colors while prefers-contrast: more stays on clears colors but keeps increased contrast.
+    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": true })));
+    assert!(rt.core().system_contrast().is_none());
+    assert!(rt.core().system_increased_contrast());
+    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": true })));
+    // Turning prefers-contrast: more off clears increased contrast and triggers a redraw.
+    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": false })));
+    assert!(!rt.core().system_increased_contrast());
+    assert!(!apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": false })));
+    // prefers-contrast: more alone (macOS/iOS/Linux browser without forced-colors) flips increased contrast.
+    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": true })));
+    assert!(rt.core().system_contrast().is_none());
+    assert!(rt.core().system_increased_contrast());
+    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": false })));
+    assert!(!rt.core().system_increased_contrast());
+
+    // Text scale defaults to 1.0, short-circuits repeats, and sanitizes invalid values.
+    assert!(!apply_text_scale(rt.core_mut(), &json!({ "kind": "text_scale", "scale": 1.0 })));
+    assert!(apply_text_scale(rt.core_mut(), &json!({ "kind": "text_scale", "scale": 1.5 })));
+    assert_eq!(rt.system_text_scale(), 1.5);
+    assert!(!apply_text_scale(rt.core_mut(), &json!({ "kind": "text_scale", "scale": 1.5 })));
+    assert!(apply_text_scale(rt.core_mut(), &json!({ "kind": "text_scale", "scale": 0.0 })));
+    assert_eq!(rt.system_text_scale(), 1.0);
 
     assert!(apply_languages(rt.core_mut(), &json!({ "kind": "languages", "languages": ["fr-FR", "en-US"] })));
     assert!(!apply_languages(rt.core_mut(), &json!({ "kind": "languages", "languages": [" fr-FR ", "", "en-US", "fr-FR"] })));
@@ -145,12 +175,14 @@ fn apply_init_decides_commit_noop_or_hidden_across_startup_states() {
         "insets": [0, 0, 0, 0],
         "visual": [0, 844, 844],
         "reduced": true,
+        "reducedTransparency": true,
         "hover": false,
         "coarse": true,
         "colors": [
             [0, 0, 0], [255, 255, 255], [0, 120, 215], [255, 255, 255],
             [128, 128, 128], [32, 32, 32], [255, 255, 255], [80, 160, 255]
         ],
+        "textScale": 1.5,
         "focused": true,
         "visible": true
     });
@@ -170,7 +202,10 @@ fn apply_init_decides_commit_noop_or_hidden_across_startup_states() {
         }
     );
     assert!(rt.core().host.system_reduced_motion());
+    assert!(rt.core().host.system_reduced_transparency());
     assert!(rt.core().system_contrast().is_some());
+    assert!(rt.core().system_increased_contrast());
+    assert_eq!(rt.system_text_scale(), 1.5);
     assert_eq!(rt.state.focus_events, vec![true]);
 
     rt.frame(0.0);
@@ -255,4 +290,63 @@ fn apply_init_decides_commit_noop_or_hidden_across_startup_states() {
         }
     );
     assert!(hidden_shared.is_visible());
+}
+
+#[test]
+fn prefers_contrast_more_alone_sets_increased_contrast_and_reruns_view() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type Seen = Rc<RefCell<Vec<(Option<crate::SystemContrast>, bool)>>>;
+    let seen: Seen = Rc::default();
+    let observed = seen.clone();
+    let spec = AppSpec::new(
+        "web-prefers-contrast",
+        (390.0, 844.0),
+        Seen::default,
+        |s: &Seen, cx: &mut Cx<Seen>| -> El {
+            s.borrow_mut().push((cx.system_contrast(), cx.system_increased_contrast()));
+            el().size(100.0, 40.0)
+        },
+    );
+    let app = App::new(spec).init(move || observed.clone());
+    let (mut rt, shared, _, _, _) = super::super::start_web_runtime(
+        app,
+        (390.0, 844.0),
+        Env::default(),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+    );
+    shared.core.set_visible(true);
+    rt.frame(0.0);
+    assert_eq!(seen.borrow().as_slice(), &[(None, false)]);
+
+    // Startup init with only prefers-contrast: more (macOS/iOS/Linux browser) commits a frame.
+    let init = json!({
+        "kind": "init",
+        "reduced": false,
+        "colors": null,
+        "increased": true,
+        "focused": false,
+        "visible": true
+    });
+    let outcome = {
+        let (core, mut app) = rt.split_mut();
+        apply_init(core, &mut app, &shared.core, &init, false, false)
+    };
+    assert_eq!(outcome.action, InitAction::CommitFrame);
+    rt.frame(0.0);
+    assert_eq!(seen.borrow().as_slice(), &[(None, false), (None, true)]);
+
+    // Repeating the same init is a NoOp and does not rebuild the view.
+    let repeat = {
+        let (core, mut app) = rt.split_mut();
+        apply_init(core, &mut app, &shared.core, &init, false, false)
+    };
+    assert_eq!(repeat.action, InitAction::NoOp);
+
+    // Live contrast event turning prefers-contrast: more off marks dirty and re-runs the view.
+    assert!(apply_contrast(rt.core_mut(), &json!({ "kind": "contrast", "colors": null, "increased": false })));
+    rt.frame(0.0);
+    assert_eq!(seen.borrow().as_slice(), &[(None, false), (None, true), (None, false)]);
 }

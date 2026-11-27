@@ -5,7 +5,6 @@ use crate::text::{ATLAS_SIZE, Atlas};
 
 mod backdrop_blur;
 mod breaker;
-#[cfg(any(target_os = "windows", target_arch = "wasm32"))]
 mod damaged;
 mod device;
 mod dxbc;
@@ -45,6 +44,8 @@ mod vulkan_icd;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod warm_machine;
 pub(crate) mod warmup;
+#[cfg(test)]
+mod wgsl_minify;
 #[cfg(target_os = "macos")]
 mod windfoil_metallib;
 
@@ -80,8 +81,9 @@ mod webgl_shader_tests;
 
 use pass::{ActivePass, Backdrop};
 
-#[cfg(target_os = "windows")]
-pub(crate) use damaged::{KeptDraw, MAX_RECTS};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use damaged::KeptDraw;
+pub(crate) use damaged::MAX_RECTS;
 pub(crate) use shader_check::ShaderError;
 pub(crate) use surface_setup::SurfaceSetupError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -218,7 +220,7 @@ impl Default for LayerSpec {
 /// soft edges and rounded-clip radius, so a compositor shader cuts its effect with the same
 /// rectangle, feathers and circular or continuous corners as the primitives around it. Prepend it
 /// to the shader source.
-pub const CLIP_WGSL: &str = include_str!("shaders/clip.wgsl");
+pub const CLIP_WGSL: &str = uber_wgsl::CLIP;
 
 /// The WGSL the precompiled DX12 bytecode is compiled from (Windfoil's, CRLF read as LF), its
 /// BLAKE3 and the hash of its pipeline layout, as the bytecode records them;
@@ -309,6 +311,9 @@ pub struct Renderer {
     effect_warm: effect_warm::EffectWarm,
     first_frame_submitted: std::sync::atomic::AtomicBool,
     surfaces: Option<crate::native_surface::SurfaceRenderer>,
+    /// Per-device native surface texture importer for compositors (`surface_texture`), adopted
+    /// into `surfaces` if a view also draws `El::native_surface`.
+    surface_importer: Option<crate::native_surface::SurfaceImporter>,
     /// The native surface renderer while its pipeline compiles (`build_surfaces`).
     surfaces_building: Option<crate::native_surface::Building>,
     pipeline: wgpu::RenderPipeline,
@@ -382,10 +387,8 @@ pub struct Renderer {
     /// limit from JavaScript (about 35 µs), which a frame's layers used to pay.
     max_texture_dim: u32,
     /// The one instance per rectangle that clears a damaged one (`arm_damage`), made on first use.
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     clear_quad: std::sync::OnceLock<wgpu::Buffer>,
     /// The kept frame and the rectangles the next `draw` may redraw alone (`damaged`).
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     damage: std::sync::Mutex<damaged::DamageState>,
 }
 
@@ -685,7 +688,13 @@ impl Renderer {
 
     pub fn submit(&self, queue: &wgpu::Queue, mut encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         self.before_submit(&mut encoder);
-        let index = if let Some(s) = &self.surfaces { s.submit(queue, encoder) } else { queue.submit([encoder.finish()]) };
+        let index = if let Some(s) = &self.surfaces {
+            s.submit(queue, encoder)
+        } else if let Some(importer) = &self.surface_importer {
+            importer.submit(queue, encoder)
+        } else {
+            queue.submit([encoder.finish()])
+        };
         self.first_frame_submitted.store(true, std::sync::atomic::Ordering::Release);
         index
     }
@@ -695,11 +704,22 @@ impl Renderer {
     #[cfg(target_os = "macos")]
     pub(crate) fn submits_plainly(&self) -> bool {
         self.surfaces.as_ref().is_none_or(|s| s.draws_nothing())
+            && self.surface_importer.as_ref().is_none_or(|i| !i.has_pending_submit())
+    }
+
+    /// Advances native-surface importer frame generation when a plain macOS overlay submission
+    /// bypasses [`Self::submit`].
+    #[cfg(target_os = "macos")]
+    pub(crate) fn note_plain_submit(&self) {
+        if let Some(s) = &self.surfaces {
+            s.note_frame_submitted();
+        } else if let Some(importer) = &self.surface_importer {
+            importer.note_frame_submitted();
+        }
     }
 
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, clear: [f32; 4]) {
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
-        if self.armed() && self.draw_armed(encoder, &view.texture()) { return; }
+        if self.armed() && self.draw_armed(encoder, view) { return; }
         self.draw_timed(encoder, view, clear, None);
     }
 

@@ -8,7 +8,7 @@ extern "C" {
     #[wasm_bindgen(js_name = isMac)]
     fn is_mac() -> bool;
     fn mount(canvas: &web_sys::HtmlCanvasElement, callback: &js_sys::Function, embedded: bool, fit_height: bool, document: bool) -> JsValue;
-    fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool);
+    fn sync(handle: &JsValue, key: &str, text: &str, base: usize, anchor: u32, focus: u32, secure: bool, single_line: bool, input_mode: &str, autofill: &str, peer_key: &str, peer_secure: bool, peer_autofill: &str, peer_type: &str);
     #[wasm_bindgen(js_name = syncCopy)]
     fn sync_copy(handle: &JsValue, text: &str);
     #[wasm_bindgen(js_name = syncA11y)]
@@ -39,6 +39,10 @@ extern "C" {
     fn sync_media_keys(handle: &JsValue, enabled: bool);
     #[wasm_bindgen(js_name = syncWheel)]
     fn sync_wheel(handle: &JsValue, used: bool);
+    #[wasm_bindgen(js_name = syncGesture)]
+    fn sync_gesture(handle: &JsValue, used: bool);
+    #[wasm_bindgen(js_name = syncKey)]
+    fn sync_key(handle: &JsValue, used: bool);
     #[wasm_bindgen(js_name = syncCaret)]
     fn sync_caret(handle: &JsValue, x: f32, y: f32, w: f32, h: f32);
     #[wasm_bindgen(js_name = syncVisualViewport)]
@@ -83,7 +87,7 @@ pub(super) struct Mode {
 }
 
 pub(super) struct Bridge {
-    handle: JsValue,
+    pub(super) handle: JsValue,
     _callback: Closure<dyn FnMut(String)>,
     dispose_viewport: js_sys::Function,
     mods: ModifiersState,
@@ -150,6 +154,12 @@ impl Bridge {
     pub(super) fn show_menu(&self, show: &crate::popup_menu::Show, dark: bool) {
         show_menu(&self.handle, &show.menu.to_json().to_string(), show.at.0, show.at.1, show.min_width, dark);
     }
+
+    fn sync_mirror(&self) {
+        let m = &self.mirror;
+        let (pk, ps, pa, pt) = m.peer.as_ref().map_or(("", false, "", ""), |p| (p.key.as_str(), p.secure, p.autofill, p.html_type));
+        sync(&self.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure, m.single_line, m.input_mode.as_html(), m.autofill.map_or("", crate::Autofill::as_html), pk, ps, pa, pt);
+    }
 }
 impl Drop for Bridge {
     fn drop(&mut self) {
@@ -190,8 +200,7 @@ impl Running {
         // input prematurely from a mid-tap `requestAnimationFrame` outside any user gesture.
         let defer_touch_sync = !focus && self.app.rt().touching();
         if !defer_touch_sync && (self.app.rt().web_context(&mut self.input.mirror) || reset) {
-            let m = &self.input.mirror;
-            sync(&self.input.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure);
+            self.input.sync_mirror();
         }
         let next_copy = self.app.copy_text().unwrap_or_default();
         if self.input.copy_cache != next_copy {
@@ -292,10 +301,7 @@ impl Running {
     /// false when a whole frame has to run inside this event instead.
     fn sync_live_edit(&mut self) -> bool {
         let Some(changed) = self.app.web_edit_context(&mut self.input.mirror) else { return false };
-        if changed {
-            let m = &self.input.mirror;
-            sync(&self.input.handle, &m.key, &m.text, m.base, m.anchor, m.focus, m.secure);
-        }
+        if changed { self.input.sync_mirror(); }
         true
     }
 
@@ -403,8 +409,13 @@ impl Running {
                 self.run_a11y_schedule(event);
                 return false;
             }
-            Some("a11y_flush") => {
-                self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand);
+            Some("a11y_flush") => { self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand); return false; }
+            Some("file_dialog") => { let ok = super::file_dialog::handle_event(self.app.rt_mut(), event); if ok { self.full_redraw = true; } return ok; }
+            Some("gesture_start") => {
+                let point = event["x"].as_f64().zip(event["y"].as_f64())
+                    .map(|(x, y)| crate::input::host_events::window_point(self.app.rt(), x as f32, y as f32));
+                let used = crate::input::host_events::web_gesture_start(self.app.rt(), point, self.input.document, self.input.fit_height);
+                sync_gesture(&self.input.handle, used);
                 return false;
             }
             Some("touch_hold_confirm") => {
@@ -429,9 +440,8 @@ impl Running {
             _ => {}
         }
         self.full_redraw = true;
-        let mut activate = false;
-        let mut a11y_press = false;
-        let mut flush_a11y = false;
+        let (mut activate, mut a11y_press, mut flush_a11y) = (false, false, false);
+        let is_key = event["kind"].as_str() == Some("key");
         // What a person typed, scrolled, hovered, pasted or activated through the page's own
         // elements is live input too: stamp its arrival time (`Tx::input_time`) and `last_input`.
         let _input = event["kind"].as_str().is_some_and(crate::input::time::is_web_dom_input)
@@ -458,14 +468,20 @@ impl Running {
                 self.resize_surface(window, size, scale);
             }
             Some("motion") => if !pe::apply_motion(self.app.rt_mut(), event) { return false; },
+            Some("transparency") => if !pe::apply_transparency(self.app.rt_mut(), event) { return false; },
             Some("languages") => if !pe::apply_languages(self.app.rt_mut(), event) { return false; },
             // The primary pointer can or can't hover (a mouse or a touch screen), read by views
             // through `Cx::hover_none`.
             Some("primary_pointer") => if !self.apply_primary_pointer(event) { return false; },
-            // The browser's `forced-colors` (a contrast theme) and its system colours, as sRGB bytes.
+            // The browser's `forced-colors` system colours and `prefers-contrast: more` preference.
             Some("contrast") => if !pe::apply_contrast(self.app.rt_mut(), event) { return false; },
+            // The browser's default font size (root `font-size` / 16px), for `Cx::system_text_scale`.
+            Some("text_scale") => if !pe::apply_text_scale(self.app.rt_mut(), event) { return false; },
             Some("focus") => {
                 let focus = self.app.apply_focus(event);
+                if focus.changed {
+                    self.observability.report_focus(event["focused"].as_bool().unwrap_or(false));
+                }
                 self.finish_focus(focus, window);
                 if !focus.changed { return false; }
             }
@@ -537,10 +553,15 @@ impl Running {
                     self.app.web_secure_replace(event["key"].as_str().unwrap_or_default(), text);
                 }
             }
-            Some("key") => activate = self.app.web_key(event),
-            Some("a11y_press" | "a11y_link") => {
+            Some("autofill") => {
+                if let serde_json::Value::String(text) = event["text"].take() {
+                    self.app.web_autofill(event["key"].as_str().unwrap_or_default(), text, event["secure"].as_bool() == Some(true));
+                }
+            }
+            Some("key") => { self.app.rt_mut().take_key_consumed(); activate = self.app.web_key(event); }
+            Some("a11y_press" | "a11y_link" | "a11y_custom") => {
                 let _ = self.app.rt_mut().web_a11y_action(event);
-                a11y_press = event["kind"].as_str() == Some("a11y_press");
+                a11y_press = matches!(event["kind"].as_str(), Some("a11y_press" | "a11y_custom"));
                 flush_a11y = true;
             }
             // The page's menu (`showMenu`) was picked from or dismissed.
@@ -584,16 +605,11 @@ impl Running {
                 let dy_pages = event["dy"].as_f64().unwrap_or(0.0) as f32;
                 let shift = !self.input.is_mac && mods.shift && !mods.ctrl;
                 let (dx, dy) = crate::input::host_events::wheel_page_delta(self.app.rt(), dx_pages, dy_pages, shift);
-                let (redraw, wheel_used) = crate::input::host_events::web_wheel(
-                    self.app.rt_mut(),
-                    dx,
-                    dy,
-                    mods,
-                    crate::GesturePhase::Moved,
-                    false,
-                    self.input.document,
-                    self.input.fit_height,
-                );
+                let notch = dx_pages.fract() == 0.0 && dy_pages.fract() == 0.0;
+                let input = crate::input::host_events::WheelInput {
+                    dx, dy, ticks: None, mods, phase: crate::GesturePhase::Moved, precise: false, notch, pinch: false,
+                };
+                let (redraw, wheel_used) = crate::input::host_events::web_wheel(self.app.rt_mut(), input, self.input.document, self.input.fit_height);
                 if let Some(used) = wheel_used { sync_wheel(&self.input.handle, used); }
                 return redraw;
             }
@@ -616,9 +632,11 @@ impl Running {
         }
         // Commit within the DOM event: clipboard, link and soft-keyboard APIs need activation.
         self.app.frame(0.0);
+        if is_key { sync_key(&self.input.handle, self.app.rt_mut().take_key_consumed()); }
         self.apply_frame_requests(window);
         self.clipboard.flush_core(self.app.rt_mut());
-        let activate = activate || (a11y_press && self.app.rt().web_has_editable_focus());
+        let activate = (activate || (a11y_press && self.app.rt().web_has_editable_focus()))
+            && self.app.rt().popup_menu().is_none();
         self.sync_input(activate);
         if flush_a11y {
             self.run_a11y_schedule(crate::runtime::web_a11y::schedule::ScheduleEvent::ConsumerDemand);
@@ -629,7 +647,7 @@ impl Running {
     pub(super) fn window_input(&mut self, event: &WindowEvent, window: &Arc<Window>) -> bool {
         let scale = window.scale_factor() as f32;
         let mut activate = crate::input::host_events::WebActivate::Never;
-        let mut immediate = false;
+        let (mut immediate, mut is_key_down) = (false, false);
         match event {
             WindowEvent::ModifiersChanged(mods) => {
                 return self.app.sync_modifiers(&mut self.input.mods, mods.state());
@@ -699,21 +717,16 @@ impl Running {
                 // rely on wheel_delta to swap vertical into horizontal (it never double-swaps
                 // when dx != 0).
                 let shift = !self.input.is_mac && self.input.mods.shift_key() && !self.input.mods.control_key();
-                let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, shift, crate::runtime::LINE_POINTS);
+                let (dx, dy) = crate::runtime::wheel_delta(*delta, scale, shift, self.app.rt().wheel_line().unwrap_or(crate::runtime::LINE_POINTS));
                 let precise = matches!(delta, winit::event::MouseScrollDelta::PixelDelta(_));
+                let notch = crate::input::host_events::line_delta_is_notch(*delta, self.input.is_mac, !self.input.is_mac);
                 // Browsers give WheelEvent no gesture phase (always Moved), matching unphased
                 // desktop mouse wheels so WheelLock uses its idle timeout.
                 let phase = crate::input::host_events::gesture_phase(*phase);
-                let (redraw, wheel_used) = crate::input::host_events::web_wheel(
-                    self.app.rt_mut(),
-                    dx,
-                    dy,
-                    crate::window::map_mods(self.input.mods),
-                    phase,
-                    precise,
-                    self.input.document,
-                    self.input.fit_height,
-                );
+                let input = crate::input::host_events::WheelInput {
+                    dx, dy, ticks: None, mods: crate::window::map_mods(self.input.mods), phase, precise, notch, pinch: false,
+                };
+                let (redraw, wheel_used) = crate::input::host_events::web_wheel(self.app.rt_mut(), input, self.input.document, self.input.fit_height);
                 if let Some(used) = wheel_used { sync_wheel(&self.input.handle, used); }
                 if !redraw { return false; }
             }
@@ -721,19 +734,26 @@ impl Running {
             WindowEvent::KeyboardInput { event, .. }
                 if self.input.document && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab) => return false,
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                self.observability.report_key(
+                    event.state == ElementState::Pressed,
+                    event.repeat,
+                    self.app.rt().has_focus(),
+                    crate::input::time::current(),
+                );
                 // Browsers expose no synchronous layout key_without_modifiers, so `key_base`
                 // derives `Tx::key_base` from `KeyboardEvent.key` when unmodified (or for shifted
                 // letters) while physical US positions arrive in `physical_key`.
-                if !self.app.keyboard(event, self.input.mods) { return false; }
+                is_key_down = event.state == ElementState::Pressed;
+                if is_key_down { self.app.rt_mut().take_key_consumed(); }
+                if !self.app.keyboard(event, self.input.mods) {
+                    if is_key_down { sync_key(&self.input.handle, false); }
+                    return false;
+                }
                 immediate = true;
                 // Any key that puts Rune's focus in a field (Tab, or a shortcut such as the
                 // prompt's) hands the page's own field the browser's focus, so a screen reader is
                 // in a real text field with its text, not on the canvas's stand-in for it.
-                activate = if event.state == ElementState::Pressed {
-                    crate::input::host_events::WebActivate::Always
-                } else {
-                    crate::input::host_events::WebActivate::Never
-                };
+                activate = if is_key_down { crate::input::host_events::WebActivate::Always } else { crate::input::host_events::WebActivate::Never };
             }
             // On a canvas as tall as its content the browser takes vertical pans and cancels the
             // touch; taps and horizontal drags stay Rune's.
@@ -761,6 +781,7 @@ impl Running {
         // commit before the DOM handler returns (clipboard, links and keyboard focus).
         if immediate {
             self.app.frame(0.0);
+            if is_key_down { sync_key(&self.input.handle, self.app.rt_mut().take_key_consumed()); }
             self.apply_frame_requests(window);
             self.clipboard.flush_core(self.app.rt_mut());
             let focus = activate.should_activate(self.app.rt());

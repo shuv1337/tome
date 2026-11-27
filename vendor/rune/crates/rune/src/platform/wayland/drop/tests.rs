@@ -724,6 +724,16 @@ impl pipe_read::Driver for MockPipe {
 }
 
 #[test]
+fn pipe_read_timeout_ms_rounds_up_submillisecond_and_clamps() {
+    assert_eq!(pipe_read::timeout_ms(Duration::from_nanos(1)), 1);
+    assert_eq!(pipe_read::timeout_ms(Duration::from_nanos(999_999)), 1);
+    assert_eq!(pipe_read::timeout_ms(Duration::from_millis(1)), 1);
+    assert_eq!(pipe_read::timeout_ms(Duration::from_nanos(1_000_001)), 2);
+    assert_eq!(pipe_read::timeout_ms(Duration::from_secs(2)), 2_000);
+    assert_eq!(pipe_read::timeout_ms(Duration::MAX), i32::MAX);
+}
+
+#[test]
 fn pipe_read_chunked_with_eintr_and_wouldblock() {
     let mut driver = MockPipe {
         now: crate::time::now(),
@@ -863,8 +873,11 @@ fn wayland_file_steps_drive_nested_targets_drop_move_and_drop_point() {
         for step in windows.take(surface) {
             match step {
                 FileStep::Enter(paths, at) => rt.drag_files(paths, at),
+                FileStep::EnterWith { paths, at, mods, allowed } => rt.drag_files_with(paths, Some(at), mods, allowed),
                 FileStep::Move(at) => { let _ = rt.drag_files_to(Some(at)); }
+                FileStep::MoveWith { at, mods, allowed } => { let _ = rt.drag_files_to_with(Some(at), mods, allowed); }
                 FileStep::Drop(paths, at) => rt.drop_files(paths, at),
+                FileStep::DropWith { paths, at, mods, allowed, operation } => rt.drop_files_with(paths, Some(at), mods, allowed, operation),
                 FileStep::Leave => rt.drag_files_leave(),
             }
         }
@@ -915,7 +928,7 @@ mod unix_pipe_tests {
 
     use wayland_client::protocol::wl_data_device_manager::DndAction;
     use super::super::machine::{ReadOutcome, SelectedAction};
-    use super::super::pipe::{CancelToken, DoneFlag, SignalOnDrop, THREAD_JOIN_BOUND, join_bounded, read_fd_bounded};
+    use crate::platform::wayland::pipe::unix::{CancelToken, DoneFlag, SignalOnDrop, THREAD_JOIN_BOUND, join_bounded, read_fd_bounded};
 
     fn nonblocking_pair() -> (OwnedFd, UnixStream) {
         let (rx, tx) = UnixStream::pair().expect("UnixStream::pair");

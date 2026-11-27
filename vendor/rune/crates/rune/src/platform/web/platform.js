@@ -1,14 +1,132 @@
+function captureControlSelection(el) {
+    if (!el || typeof el.setSelectionRange !== 'function') return null;
+    try {
+        const start = el.selectionStart;
+        const end = el.selectionEnd;
+        if (typeof start !== 'number' || typeof end !== 'number') return null;
+        return { start, end, dir: el.selectionDirection ?? 'none' };
+    } catch {
+        return null;
+    }
+}
+
+function restoreControlSelection(el, saved) {
+    if (!el || !saved || typeof el.setSelectionRange !== 'function') return;
+    try {
+        if (el.selectionStart === saved.start
+            && el.selectionEnd === saved.end
+            && (el.selectionDirection ?? 'none') === saved.dir) {
+            return;
+        }
+        el.setSelectionRange(saved.start, saved.end, saved.dir);
+    } catch {}
+}
+
+function writeClipboardFallback(text) {
+    if (typeof document === 'undefined' || !document.body || typeof document.execCommand !== 'function') {
+        throw new Error('Clipboard copy failed.');
+    }
+    const active = document.activeElement ?? null;
+    const savedControlSel = captureControlSelection(active);
+    const selection = typeof document.getSelection === 'function' ? document.getSelection() : null;
+    const ranges = [];
+    if (selection) {
+        for (let i = 0; i < selection.rangeCount; i++) {
+            ranges.push(selection.getRangeAt(i).cloneRange());
+        }
+    }
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.readOnly = true;
+    field.tabIndex = -1;
+    field.setAttribute('aria-hidden', 'true');
+    field.setAttribute('data-rune-clipboard', '');
+    field.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none;font-size:16px;';
+    document.body.append(field);
+    try {
+        if (typeof field.focus === 'function') field.focus({ preventScroll: true });
+        if (typeof field.select === 'function') field.select();
+        if (typeof field.setSelectionRange === 'function') field.setSelectionRange(0, field.value.length);
+        if (!document.execCommand('copy')) {
+            throw new Error('Clipboard copy failed.');
+        }
+    } finally {
+        field.remove();
+        const restoreSelection = () => {
+            if (!selection) return;
+            try {
+                selection.removeAllRanges();
+                for (const range of ranges) selection.addRange(range);
+            } catch {}
+        };
+        const restoreFocus = () => {
+            if (!active || typeof active.focus !== 'function') return;
+            if ((active === document.body || active === document.documentElement) && document.activeElement === active) return;
+            try {
+                active.focus({ preventScroll: true });
+            } catch {}
+        };
+        if (savedControlSel) {
+            restoreSelection();
+            restoreFocus();
+            restoreControlSelection(active, savedControlSel);
+        } else {
+            restoreFocus();
+            restoreSelection();
+        }
+    }
+}
+
 // Plain text, with HTML and a PNG image (a Uint8Array) beside it when there are some (`html`
-// is '' and `png` empty otherwise). Empty text isn't written beside another form.
+// is '' and `png` empty otherwise). Empty text isn't written beside another form. Falls back
+// to a temporary off-screen `<textarea>` and `document.execCommand('copy')` when the async
+// Clipboard API is absent or rejects and plain text is available.
 export async function writeClipboard(text, html, png) {
-    const clipboard = navigator.clipboard;
-    if (!clipboard) throw new Error('Clipboard requires HTTPS.');
-    if ((!html && !png.length) || typeof ClipboardItem === 'undefined') return clipboard.writeText(text);
-    const forms = {};
-    if (text) forms['text/plain'] = new Blob([text], { type: 'text/plain' });
-    if (html) forms['text/html'] = new Blob([html], { type: 'text/html' });
-    if (png.length) forms['image/png'] = new Blob([png], { type: 'image/png' });
-    return clipboard.write([new ClipboardItem(forms)]);
+    const hasHtml = Boolean(html);
+    const hasPng = Boolean(png && png.length);
+    const rich = hasHtml || hasPng;
+    const hasPlain = Boolean(text) || !rich;
+    const clipboard = globalThis.navigator?.clipboard;
+    if (!clipboard) {
+        if (!hasPlain) throw new Error('Clipboard requires HTTPS.');
+        writeClipboardFallback(text);
+        return;
+    }
+    if (rich) {
+        if (typeof ClipboardItem !== 'undefined' && typeof clipboard.write === 'function') {
+            try {
+                const forms = {};
+                if (text) forms['text/plain'] = new Blob([text], { type: 'text/plain' });
+                if (hasHtml) forms['text/html'] = new Blob([html], { type: 'text/html' });
+                if (hasPng) forms['image/png'] = new Blob([png], { type: 'image/png' });
+                await clipboard.write([new ClipboardItem(forms)]);
+                return;
+            } catch (err) {
+                if (!hasPlain) throw err;
+                const denied = err?.name === 'NotAllowedError' || err?.name === 'SecurityError';
+                if (!denied && typeof clipboard.writeText === 'function') {
+                    try {
+                        await clipboard.writeText(text);
+                        return;
+                    } catch {}
+                }
+                writeClipboardFallback(text);
+                return;
+            }
+        }
+        if (!hasPlain) {
+            throw new Error(typeof ClipboardItem === 'undefined'
+                ? 'ClipboardItem is unavailable in this browser.'
+                : 'Clipboard.write is unavailable in this browser.');
+        }
+    }
+    if (typeof clipboard.writeText === 'function') {
+        try {
+            await clipboard.writeText(text);
+            return;
+        } catch {}
+    }
+    writeClipboardFallback(text);
 }
 
 // Shared PNG encoder source used both inside a Blob Web Worker (off main thread) and as a
@@ -330,6 +448,61 @@ export function writeClipboardImage(extract, checkOutcome, maxBytes) {
     }
 }
 
+const MAX_IMAGE_PIXELS = 64 * 1024 * 1024;
+
+function isRasterImageType(type) {
+    if (typeof type !== 'string') return false;
+    const t = type.toLowerCase();
+    return t.startsWith('image/') && t !== 'image/svg+xml';
+}
+
+// Decodes a non-PNG raster image blob (JPEG, WebP, GIF, AVIF, BMP, etc.) via `createImageBitmap`
+// and re-encodes it as PNG bytes within `MAX_IMAGE_PIXELS` and `max` bytes.
+async function transcodeImageToPng(blob, max) {
+    if (typeof globalThis.createImageBitmap !== 'function') return undefined;
+    let bitmap;
+    try {
+        bitmap = await globalThis.createImageBitmap(blob);
+    } catch {
+        return undefined;
+    }
+    try {
+        const w = bitmap.width | 0, h = bitmap.height | 0;
+        if (w <= 0 || h <= 0 || w * h > MAX_IMAGE_PIXELS) return undefined;
+        let canvas, ctx;
+        if (typeof globalThis.OffscreenCanvas === 'function') {
+            canvas = new globalThis.OffscreenCanvas(w, h);
+            ctx = canvas.getContext('2d');
+        } else if (typeof globalThis.document?.createElement === 'function') {
+            canvas = globalThis.document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            ctx = canvas.getContext('2d');
+        }
+        if (!ctx) return undefined;
+        ctx.drawImage(bitmap, 0, 0);
+        if (typeof canvas.convertToBlob === 'function') {
+            const out = await canvas.convertToBlob({ type: 'image/png' });
+            return out && out.size > 0 && out.size <= max ? new Uint8Array(await out.arrayBuffer()) : undefined;
+        }
+        if (typeof canvas.toBlob === 'function') {
+            const out = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+            return out && out.size > 0 && out.size <= max ? new Uint8Array(await out.arrayBuffer()) : undefined;
+        }
+        if (typeof ctx.getImageData === 'function') {
+            const data = ctx.getImageData(0, 0, w, h)?.data;
+            if (!data) return undefined;
+            const res = await encodePngAsync(w, h, new Uint8Array(data.buffer, data.byteOffset, data.byteLength), false, max);
+            return res?.png;
+        }
+        return undefined;
+    } catch {
+        return undefined;
+    } finally {
+        bitmap.close?.();
+    }
+}
+
 // `{ text, html, png }`, each undefined when the clipboard lacks it; `html` only when `rich`,
 // and `png` (a Uint8Array of at most `maxImage` bytes) only when `image`. `read()` starts
 // before the first await, inside the input handler; where it fails, plain `readText()` is the
@@ -343,7 +516,10 @@ export async function readClipboard(rich, image, maxImage) {
             for (const item of await clipboard.read()) {
                 if (text === undefined && item.types.includes('text/plain')) text = await (await item.getType('text/plain')).text();
                 if (html === undefined && item.types.includes('text/html')) html = await (await item.getType('text/html')).text();
-                if (image && png === undefined && item.types.includes('image/png')) png = await pngBytes(await item.getType('image/png'), maxImage);
+                if (image && png === undefined) {
+                    const imgType = item.types.includes('image/png') ? 'image/png' : item.types.find(isRasterImageType);
+                    if (imgType) png = await pngBytes(await item.getType(imgType), maxImage);
+                }
             }
             return { text, html, png };
         } catch {}
@@ -351,9 +527,15 @@ export async function readClipboard(rich, image, maxImage) {
     return { text: await clipboard.readText() };
 }
 
-// A PNG blob's bytes, or undefined when it's larger than `max`.
+// A PNG or raster image blob's PNG bytes, or undefined when unsupported or larger than `max`.
 export async function pngBytes(blob, max) {
-    return blob && blob.size <= max ? new Uint8Array(await blob.arrayBuffer()) : undefined;
+    if (!blob) return undefined;
+    const type = String(blob.type ?? '').toLowerCase();
+    if (!type || type === 'image/png') {
+        return blob.size <= max ? new Uint8Array(await blob.arrayBuffer()) : undefined;
+    }
+    if (isRasterImageType(type)) return transcodeImageToPng(blob, max);
+    return undefined;
 }
 
 // Opens `url` in a new tab with no opener or referrer. False when no click or key press was
@@ -388,12 +570,18 @@ export function revokeUrl(url) {
     URL.revokeObjectURL(url);
 }
 
-// Sets `canvas`'s CSS cursor, or clears it when `css` is empty. Safari reads `image-set()` in a
-// cursor only with its `-webkit-` prefix.
+// Sets `canvas`'s CSS cursor, or clears it when `css` is empty. Clears first so a rejected
+// value never leaves a prior cursor behind: Safari reads `image-set()` in a cursor only with
+// its `-webkit-` prefix, and Firefox ignores `image-set()` in `cursor` and falls back to `url()`.
 export function setCursor(canvas, css) {
-    if (!css) return void canvas.style.removeProperty('cursor');
+    canvas.style.removeProperty('cursor');
+    if (!css) return;
     canvas.style.cursor = css;
     if (!canvas.style.cursor) canvas.style.cursor = `-webkit-${css}`;
+    if (!canvas.style.cursor && css.startsWith('image-set(')) {
+        const fallback = css.replace(/^image-set\(\s*(url\((?:"[^"]*"|'[^']*'|[^)]*)\))\s+[^)]*\)/, '$1');
+        if (fallback !== css) canvas.style.cursor = fallback;
+    }
 }
 
 // Resolves in the page's next idle time, or after `timeout` ms at the latest.
@@ -455,13 +643,17 @@ export function viewport(canvas, callback, embedded) {
     const update = () => callback(JSON.stringify({ kind: 'viewport', ...readViewport() }));
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const reduced = () => callback(JSON.stringify({ kind: 'motion', reduced: motion.matches }));
+    const transparency = matchMedia('(prefers-reduced-transparency: reduce)');
+    const reducedTransparency = () => callback(JSON.stringify({ kind: 'transparency', reduced: transparency.matches }));
     // A primary pointer that can't hover (a touch screen): `Cx::hover_none`.
     const hoverNone = matchMedia('(hover: none)');
     const coarse = matchMedia('(pointer: coarse)');
     const pointer = () => callback(JSON.stringify({ kind: 'primary_pointer', hover: !hoverNone.matches, coarse: coarse.matches }));
-    // A contrast theme (Windows' Contrast themes): `forced-colors`, and its system colours read
-    // off a probe, as sRGB bytes, for `Cx::system_contrast`.
+    // A contrast theme (Windows' Contrast themes: `forced-colors`, with its system colours read
+    // off a probe as sRGB bytes for `Cx::system_contrast`) and increased-contrast preference
+    // (`prefers-contrast: more` or `forced-colors: active`, for `Cx::system_increased_contrast`).
     const forced = matchMedia('(forced-colors: active)');
+    const moreContrast = matchMedia('(prefers-contrast: more)');
     const readContrast = () => {
         if (!forced.matches) return null;
         const swatch = document.createElement('span');
@@ -474,14 +666,42 @@ export function viewport(canvas, callback, embedded) {
         swatch.remove();
         return colors;
     };
-    const contrast = () => callback(JSON.stringify({ kind: 'contrast', colors: readContrast() }));
+    const contrast = () => callback(JSON.stringify({
+        kind: 'contrast',
+        colors: readContrast(),
+        increased: moreContrast.matches || forced.matches,
+    }));
+    // The browser's default font size (root `font-size` / 16px), for `Cx::system_text_scale`.
+    // A hidden `10rem` probe observed by ResizeObserver fires whenever the user changes the
+    // browser's font-size setting without needing a window resize.
+    const readTextScale = () => {
+        const root = document.documentElement;
+        const px = root ? parseFloat(getComputedStyle(root).fontSize) : NaN;
+        return Number.isFinite(px) && px > 0 ? px / 16 : 1;
+    };
+    let lastTextScale = readTextScale();
+    const textScaleProbe = document.createElement('div');
+    textScaleProbe.style.cssText = 'position:fixed;top:0;left:0;width:10rem;height:0;visibility:hidden;pointer-events:none';
+    document.body.append(textScaleProbe);
+    const textScale = () => {
+        const next = readTextScale();
+        if (next === lastTextScale) return;
+        lastTextScale = next;
+        callback(JSON.stringify({ kind: 'text_scale', scale: next }));
+    };
     const focus = () => callback(JSON.stringify({ kind: 'focus', focused: document.hasFocus() }));
     const languageChange = () => callback(JSON.stringify({ kind: 'languages', languages: preferredLanguages() }));
     const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden, focused: document.hasFocus() }));
     let dprMedia = null;
     const watchDpr = () => {
         dprMedia?.removeEventListener('change', onDpr);
-        dprMedia = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        const dpr = window.devicePixelRatio || 1;
+        let media = matchMedia(`(resolution: ${dpr}dppx)`);
+        if (!media.matches) {
+            const webkit = matchMedia(`(-webkit-device-pixel-ratio: ${dpr})`);
+            if (webkit.matches) media = webkit;
+        }
+        dprMedia = media;
         dprMedia.addEventListener('change', onDpr);
     };
     function onDpr() {
@@ -497,10 +717,14 @@ export function viewport(canvas, callback, embedded) {
     // them (its content box is always empty, which is what an observer watches by default).
     const insets = new ResizeObserver(update);
     insets.observe(probe, { box: 'border-box' });
+    const textScaleObserver = new ResizeObserver(textScale);
+    textScaleObserver.observe(textScaleProbe, { box: 'border-box' });
     motion.addEventListener('change', reduced);
+    transparency.addEventListener('change', reducedTransparency);
     hoverNone.addEventListener('change', pointer);
     coarse.addEventListener('change', pointer);
     forced.addEventListener('change', contrast);
+    moreContrast.addEventListener('change', contrast);
     window.addEventListener('focus', focus);
     window.addEventListener('blur', focus);
     window.addEventListener('languagechange', languageChange);
@@ -510,13 +734,17 @@ export function viewport(canvas, callback, embedded) {
     // single snapshot instead of six separate callbacks.
     queueMicrotask(() => {
         if (disposed) return;
+        lastTextScale = readTextScale();
         callback(JSON.stringify({
             kind: 'init',
             ...readViewport(),
             reduced: motion.matches,
+            reducedTransparency: transparency.matches,
             hover: !hoverNone.matches,
             coarse: coarse.matches,
             colors: readContrast(),
+            increased: moreContrast.matches || forced.matches,
+            textScale: lastTextScale,
             focused: document.hasFocus(),
             visible: !document.hidden,
         }));
@@ -528,17 +756,86 @@ export function viewport(canvas, callback, embedded) {
         window.visualViewport?.removeEventListener('scroll', update);
         window.removeEventListener('resize', update);
         insets.disconnect();
+        textScaleObserver.disconnect();
         motion.removeEventListener('change', reduced);
+        transparency.removeEventListener('change', reducedTransparency);
         hoverNone.removeEventListener('change', pointer);
         coarse.removeEventListener('change', pointer);
         forced.removeEventListener('change', contrast);
+        moreContrast.removeEventListener('change', contrast);
         window.removeEventListener('focus', focus);
         window.removeEventListener('blur', focus);
         window.removeEventListener('languagechange', languageChange);
         document.removeEventListener('visibilitychange', visibility);
         probe.remove();
         largest.remove();
+        textScaleProbe.remove();
     };
+}
+
+const AUTO_HEIGHT = new Set(['auto', 'initial', 'unset', 'revert', 'revert-layer']);
+
+// Styles an inline `App::canvas_id` canvas to fill its parent's width while preserving any height
+// the page gave it (inline style, stylesheet rule, `aspect-ratio`, or flex/grid stretch). When
+// `fitHeight` is false and the page left CSS height unset (which would keep `<canvas>`'s default
+// 2:1 intrinsic box), falls back to `specHeight` from `AppSpec::size`.
+export function styleInlineCanvas(canvas, specHeight, fitHeight) {
+    const style = canvas.style;
+    const props = [
+        ['display', 'block'],
+        ['width', '100%'],
+        ['touch-action', fitHeight ? 'pan-y' : 'none'],
+        ['outline', 'none'],
+        ['user-select', 'none'],
+        ['-webkit-user-select', 'none'],
+    ];
+    for (const [name, value] of props) style.setProperty(name, value);
+    if (fitHeight || !Number.isFinite(specHeight) || specHeight <= 0) return;
+    const inlineH = String(style.getPropertyValue?.('height') ?? style.height ?? '').trim().toLowerCase();
+    if (inlineH && !AUTO_HEIGHT.has(inlineH)) return;
+    const before = typeof canvas.getBoundingClientRect === 'function' ? canvas.getBoundingClientRect().height : 0;
+    if (before > 0) {
+        const origW = canvas.getAttribute('width');
+        const origH = canvas.getAttribute('height');
+        let tracksIntrinsic = false;
+        try {
+            canvas.setAttribute('width', '100');
+            canvas.setAttribute('height', '1');
+            if (Math.abs(canvas.getBoundingClientRect().height - before) > 0.5) {
+                tracksIntrinsic = true;
+            } else {
+                canvas.setAttribute('width', '1');
+                canvas.setAttribute('height', '100');
+                if (Math.abs(canvas.getBoundingClientRect().height - before) > 0.5) {
+                    tracksIntrinsic = true;
+                }
+            }
+        } finally {
+            if (origW === null) canvas.removeAttribute('width');
+            else canvas.setAttribute('width', origW);
+            if (origH === null) canvas.removeAttribute('height');
+            else canvas.setAttribute('height', origH);
+        }
+        if (tracksIntrinsic) style.setProperty('height', `${specHeight}px`);
+        return;
+    }
+    let cssHeight = '';
+    let cssAspect = '';
+    if (typeof canvas.computedStyleMap === 'function') {
+        try {
+            const map = canvas.computedStyleMap();
+            cssHeight = String(map.get('height') ?? '').trim().toLowerCase();
+            cssAspect = String(map.get('aspect-ratio') ?? '').trim().toLowerCase();
+        } catch {}
+    }
+    if (!cssHeight && typeof getComputedStyle === 'function') {
+        const cs = getComputedStyle(canvas);
+        cssHeight = String(cs.height ?? '').trim().toLowerCase();
+        cssAspect = String(cs.aspectRatio ?? '').trim().toLowerCase();
+    }
+    if ((!cssHeight || AUTO_HEIGHT.has(cssHeight)) && (!cssAspect || cssAspect === 'auto')) {
+        style.setProperty('height', `${specHeight}px`);
+    }
 }
 
 // One face of an app font as the page's own, so the semantic mirror's text sets in it.

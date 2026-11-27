@@ -279,7 +279,7 @@ impl RuntimeCore {
             let mut h = rune_motion::Fx::default();
             bits(&mut h, &[self.env.scale]);
             bits(&mut h, &vp);
-            (self.paint.srgb_blend, self.track_marks, self.reduced_motion, self.env.system_dark, self.text.emit_key(), self.tree.has_sticky, tree_order).hash(&mut h);
+            (self.paint.srgb_blend, self.track_marks, self.reduced_motion, self.host.system_reduced_transparency, self.env.system_dark, self.text.emit_key(), self.tree.has_sticky, tree_order).hash(&mut h);
             (self.kbd.focus.path(), self.kbd.focus.keyboard(), self.kbd.focus.shown()).hash(&mut h);
             default_ring.map(|i| self.tree.nodes[i].id).hash(&mut h);
             let ring = self.default_focus_ring();
@@ -765,7 +765,7 @@ fn own_key(rt: &RuntimeCore, i: usize) -> u64 {
 fn static_ok(n: &Node) -> bool {
     n.input.is_none() && !n.ime_cursor && n.scroll.is_none() && n.looping.is_none() && n.live.is_empty()
         && n.vis.surface.is_none() && n.material.is_none() && !n.vis_flags.cache() && !n.vis_flags.raise()
-        && n.vis.backdrop_blur <= 0.0 && n.vis.effect.is_none() && n.vis.pixels.is_none()
+        && n.vis.backdrop_blur <= 0.0 && n.vis.effect.is_none() && n.vis.pixels.is_none() && n.vis.web_image.is_none()
         && n.sticky.is_none() && n.above.is_none() && n.matched.is_none()
         && n.static_scale == 1.0 && !n.scale_track && n.vis.mark == 0
         && n.text.as_ref().is_none_or(|t| t.cold.links.is_empty() && t.cold.advance_in.is_none()

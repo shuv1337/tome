@@ -318,6 +318,18 @@ impl Renderer {
             self.uploads.lost.0 = staging.lost();
             self.resend_uploads(atlas);
         }
+        let atlas_work = crate::frame::stage::active()
+            && (atlas.dirty.is_some()
+                || atlas.pages.iter().any(|p| p.dirty.is_some())
+                || atlas.has_pending_fills()
+                || atlas.page_rows(0) > self.atlas.height()
+                || self.atlas_pages.len() != atlas.pages.len()
+                || atlas.outlines.has_records());
+        let mut glyph_atlas_stage = if atlas_work {
+            crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::GlyphAtlas)
+        } else {
+            crate::frame::stage::StageGuard::default()
+        };
         // The Windfoil shader, built the first time text draws from outlines (render/variant.rs),
         // fills atlas pages on the GPU, so the pages are made again as ones it can draw into.
         if atlas.outlines.has_records() && self.select(device, variant::Event::OutlinesWanted) {
@@ -364,6 +376,7 @@ impl Renderer {
         if atlas_changed { self.images_changed(); }
         self.upload_outlines(device, &staging, atlas);
         self.fill_atlas(device, queue, &staging, atlas);
+        glyph_atlas_stage.end();
         if self.instances.ensure(device, instances.len()) {
             self.uploads.forget_instances();
         }
@@ -388,10 +401,7 @@ impl Renderer {
         }
         let has_layers = self.uploads.has_layers;
         // A loop-only frame that draws no layer leaves them as the last frame drew them.
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
         let layers_kept = self.uploads.patched && self.cycle_leaves_layers();
-        #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
-        let layers_kept = false;
         if !layers_kept { self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport); }
         self.sync_resident_caches(&mut atlas.resident_caches);
         self.backdrop_used = self.effects.iter().any(|(_, i)| i.params[0] != 0.0 || i.kind() == Some(Kind::BackdropBlur));
@@ -460,6 +470,9 @@ impl Renderer {
         if self.surfaces.is_none() && self.surfaces_building.is_some() { return; }
         if (!draws.is_empty() || built.is_some()) && self.surfaces.is_none() {
             let mut surfaces = built.unwrap_or_else(|| crate::native_surface::SurfaceRenderer::new(device, self.format));
+            if let Some(importer) = self.surface_importer.take() {
+                surfaces.adopt_importer(importer);
+            }
             surfaces.set_srgb_blend(self.srgb_blend);
             surfaces.set_staging(self.uploads.staging(device, queue));
             for (format, _) in &self.extra { surfaces.add_format(device, *format); }
@@ -469,8 +482,35 @@ impl Renderer {
             s.set_srgb_blend(self.srgb_blend);
             if self.layers.additive.is_some() { s.add_plus_lighter(device, layers::FORMAT); }
             s.prepare(device,queue,draws,viewport);
+        } else if let Some(importer) = &mut self.surface_importer {
+            importer.prune_stale();
         }
         if self.layer_stats().targets > 0 { self.position_layer_surfaces(queue); }
+    }
+
+    /// Imports `surface`'s current frame onto `device` as `wgpu::Texture` plane(s), reusing this
+    /// renderer's per-device importer and texture cache across frames (and sharing it with
+    /// `El::native_surface` draws when present).
+    ///
+    /// Returns `Ok(None)` when `surface` holds no frame, `Ok(Some(_))` with the imported plane
+    /// texture(s) and colour/orientation metadata, or `Err` if importing failed (also stored on
+    /// [`NativeSurface::last_error`](crate::NativeSurface::last_error)).
+    ///
+    /// Samples the surface's already-pushed frame mailbox; it does not drive a
+    /// [`Player`](crate::Player)-backed surface unless that surface is also drawn in the view tree.
+    pub fn surface_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: &crate::NativeSurface,
+    ) -> Result<Option<crate::native_surface::ImportedSurface>, String> {
+        if let Some(s) = &mut self.surfaces {
+            s.surface_texture(queue, surface)
+        } else {
+            self.surface_importer
+                .get_or_insert_with(|| crate::native_surface::SurfaceImporter::new(device))
+                .import(queue, surface)
+        }
     }
 
     /// One uniform write per presentation-only frame; use the display's target time.

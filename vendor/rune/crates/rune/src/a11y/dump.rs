@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 
 use crate::runtime::HashMap;
 
-pub(super) const ACTIONS: [(Action, &str); 16] = [
+pub(super) const ACTIONS: [(Action, &str); 17] = [
     (Action::Click, "click"), (Action::Focus, "focus"), (Action::ShowContextMenu, "context-menu"),
+    (Action::CustomAction, "custom-action"),
     (Action::Expand, "expand"), (Action::Collapse, "collapse"), (Action::Increment, "increment"),
     (Action::Decrement, "decrement"), (Action::SetValue, "set-value"), (Action::ReplaceSelectedText, "replace-selected-text"),
     (Action::SetTextSelection, "set-text-selection"), (Action::ScrollIntoView, "scroll-into-view"), (Action::ScrollUp, "scroll-up"),
@@ -47,6 +48,7 @@ impl Tree<'_> {
             None => origin,
         };
         let mut v = json!({ "role": super::roles::name(n.role()) });
+        if let Some(rd) = n.role_description() { v["roleDescription"] = rd.into(); }
         if let Some(key) = n.author_id() { v["key"] = key.into(); }
         if let Some(name) = self.name(n) { v["name"] = name.into(); }
         if n.role() != Role::Label && let Some(value) = n.value() { v["value"] = value.into(); }
@@ -113,6 +115,20 @@ impl Tree<'_> {
                 accesskit::AutoComplete::Both => "both",
             }.into();
         }
+        if let Some(cur) = n.aria_current() {
+            let s = match cur {
+                accesskit::AriaCurrent::Page => Some("page"),
+                accesskit::AriaCurrent::Step => Some("step"),
+                accesskit::AriaCurrent::Location => Some("location"),
+                accesskit::AriaCurrent::Date => Some("date"),
+                accesskit::AriaCurrent::Time => Some("time"),
+                accesskit::AriaCurrent::True => Some("true"),
+                accesskit::AriaCurrent::False => None,
+            };
+            if let Some(s) = s {
+                v["current"] = s.into();
+            }
+        }
         match n.sort_direction() {
             Some(accesskit::SortDirection::Ascending) => v["sort"] = "ascending".into(),
             Some(accesskit::SortDirection::Descending) => v["sort"] = "descending".into(),
@@ -143,6 +159,14 @@ impl Tree<'_> {
         if !states.is_empty() { v["states"] = json!(states); }
         let actions: Vec<&str> = ACTIONS.iter().filter(|(a, _)| n.supports_action(*a)).map(|(_, s)| *s).collect();
         if !actions.is_empty() { v["actions"] = json!(actions); }
+        if !n.custom_actions().is_empty() {
+            v["customActions"] = Value::Array(
+                n.custom_actions()
+                    .iter()
+                    .map(|a| json!({ "id": a.id, "description": a.description }))
+                    .collect(),
+            );
+        }
         if let Some(b) = n.bounds() {
             v["bounds"] = json!([r1(b.x0 + origin[0]), r1(b.y0 + origin[1]), r1(b.width()), r1(b.height())]);
         }

@@ -58,8 +58,17 @@ impl CommitState {
         if hot || checking_live_only || (self.virtuals.is_empty() && self.virtual_items.is_empty()) || tree.nodes.is_empty() {
             return false;
         }
+        if !tree.aspect_snap.is_empty() {
+            return false;
+        }
+        let check_aspect = tree.has_pixel_aspect;
         if !tree.nodes.iter().all(|n| {
-            relayout::reusable(n) && n.text.as_ref().is_none_or(|t| !t.redacted)
+            relayout::reusable(n)
+                && n.text.as_ref().is_none_or(|t| !t.redacted)
+                && (!check_aspect
+                    || n.cold.get().and_then(|c| c.pixel_aspect).is_none_or(|r| {
+                        n.vis.pixels.as_ref().is_some_and(|p| flatten::pixel_ratio(p) == r)
+                    }))
         }) {
             return false;
         }
@@ -319,6 +328,7 @@ impl Measurement<'_> {
             self.env,
             self.system_accent,
             self.system_reduced_motion,
+            self.system_reduced_transparency,
             self.languages_gen,
             crate::theme::blends_srgb(),
             self.memo_chrome_bits(),
@@ -749,6 +759,7 @@ impl Measurement<'_> {
             titlebar: self.titlebar,
             caret_read: self.caret_read,
             wm_state_read: None,
+            primary_pointer_read: None,
             layout_reads: self.layout_reads,
             memo_flattened: Some(pending),
             memo_reused: reused,

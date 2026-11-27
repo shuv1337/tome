@@ -6,7 +6,6 @@ use super::{
     shader_check, upload, variant,
 };
 
-#[cfg(any(target_os = "windows", target_arch = "wasm32"))]
 use super::damaged;
 
 /// The `Send` state of a [`Renderer`]: every field except `surfaces` (the lazy native surface
@@ -58,9 +57,7 @@ pub(super) struct WarmRenderer {
     pub(super) fills: std::sync::Mutex<Option<fill::PendingFills>>,
     pub(super) device_key: crate::compose::DeviceKey,
     pub(super) max_texture_dim: u32,
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     pub(super) clear_quad: std::sync::OnceLock<wgpu::Buffer>,
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     pub(super) damage: std::sync::Mutex<damaged::DamageState>,
 }
 
@@ -119,15 +116,14 @@ impl Renderer {
             fills,
             device_key,
             max_texture_dim,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             clear_quad,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             damage,
         } = warm;
         Renderer {
             effect_warm,
             first_frame_submitted,
             surfaces: None,
+            surface_importer: None,
             fade_stops: [0.0; 2],
             surfaces_building,
             pipeline,
@@ -172,9 +168,7 @@ impl Renderer {
             device_key,
             gpu_host: None,
             max_texture_dim,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             clear_quad,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             damage,
         }
     }
@@ -192,8 +186,7 @@ impl Renderer {
         self.image_batches.clear();
         self.count = 0;
         self.effects.clear();
-        #[cfg(target_os = "windows")]
-        { *self.damage.get_mut().unwrap_or_else(|e| e.into_inner()) = Default::default(); }
+        *self.damage.get_mut().unwrap_or_else(|e| e.into_inner()) = Default::default();
         #[cfg(all(feature = "alloc-sites", not(target_arch = "wasm32")))]
         self.report_pools();
     }
@@ -202,13 +195,14 @@ impl Renderer {
     /// the calling thread and returns `None` otherwise.
     #[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
     pub(super) fn into_warm(self) -> Option<WarmRenderer> {
-        if self.surfaces.is_some() {
+        if self.surfaces.is_some() || self.surface_importer.is_some() {
             return None;
         }
         let Renderer {
             effect_warm,
             first_frame_submitted,
             surfaces: _,
+            surface_importer: _,
             fade_stops: _,
             surfaces_building,
             pipeline,
@@ -253,9 +247,7 @@ impl Renderer {
             device_key,
             gpu_host: _,
             max_texture_dim,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             clear_quad,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             damage,
         } = self;
         Some(WarmRenderer {
@@ -303,9 +295,7 @@ impl Renderer {
             fills,
             device_key,
             max_texture_dim,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             clear_quad,
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             damage,
         })
     }
