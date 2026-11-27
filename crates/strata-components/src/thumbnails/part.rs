@@ -305,7 +305,7 @@ pub fn entry_glyph(look: &Look, entry: Entry<'_>, points: f32, default_color: ru
     if let Some(badge) = entry.glyph
         && wears_folder_badge(look, entry)
     {
-        let fill = entry.color.unwrap_or(look.kit.c.icon_accent);
+        let fill = entry.color.unwrap_or(default_color);
         return folder_badge(look, badge, points, fill).key(GLYPH);
     }
     if let Some(EntryGlyph::Emoji(emoji)) = entry.glyph {
@@ -353,7 +353,12 @@ fn placeholder(rcx: &RowCx<'_>, points: f32, opacity: f32) -> El {
             .key(GLYPH)
             .color(look.kit.c.icon_accent)
             .a11y_hidden(),
-        None => entry_glyph(look, rcx.entry, points, look.kit.c.icon_accent),
+        None => entry_glyph(
+            look,
+            rcx.entry,
+            points,
+            strata_kit::slots::collection::entry_icon(look),
+        ),
     };
     match opacity < 1.0 {
         true => glyph.opacity(opacity),

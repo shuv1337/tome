@@ -176,7 +176,7 @@ fn a_rounded_radius_matches_kit_at_the_same_base() {
 
 #[test]
 fn accent_icon_kit_routes_icon_button_roles_to_accent() {
-    let look = Look::fallback(true);
+    let mut look = Look::fallback(true);
     let accent = look.kit.c.icon_accent;
     let ik = look.accent_icon_kit();
     assert_eq!(ik.c.text_base, accent);
@@ -186,6 +186,18 @@ fn accent_icon_kit_routes_icon_button_roles_to_accent() {
     assert_eq!(ik.c.hover, look.kit.c.hover);
     assert_eq!(ik.c.pressed, look.kit.c.pressed);
     assert_eq!(ik.c.border_focus, look.kit.c.border_focus);
+
+    let custom = crate::theme::Rgba8::parse("#94a3b8").expect("hex").color();
+    crate::tokens::set(
+        &mut look,
+        "chrome.action.icon",
+        crate::tokens::Value::Color(custom),
+    )
+    .expect("set chrome.action.icon");
+    let overridden = look.accent_icon_kit();
+    assert_eq!(overridden.c.text_base, custom);
+    assert_eq!(overridden.c.icon_base, custom);
+    assert_eq!(overridden.c.icon_muted, custom);
 }
 
 #[test]

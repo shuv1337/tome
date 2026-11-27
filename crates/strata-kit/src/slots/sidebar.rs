@@ -17,7 +17,9 @@ pub const ICON_BOX: f32 = 16.0;
 pub struct Sidebar {
     pub row_height: Option<f32>,
     pub row_gap: Option<f32>,
+    pub row_icon: Option<Color>,
     pub selected_fill: Option<Color>,
+    pub selected_border: Option<Color>,
     pub selected_icon: Option<Color>,
     pub hover_fill: Option<Color>,
     pub divider_color: Option<Color>,
@@ -38,6 +40,14 @@ pub fn row_gap(look: &Look) -> f32 {
     look.slots.sidebar.row_gap.unwrap_or(look.space.xxs)
 }
 
+/// An unselected sidebar row's icon colour: `sidebar.row.icon`, else `kit.c.icon_accent`.
+pub fn row_icon(look: &Look) -> Color {
+    look.slots
+        .sidebar
+        .row_icon
+        .unwrap_or(look.kit.c.icon_accent)
+}
+
 /// The current row's fill: `sidebar.selected.fill`, else the accent at 18 %.
 pub fn selected_fill(look: &Look) -> Color {
     let k = &look.kit;
@@ -45,6 +55,14 @@ pub fn selected_fill(look: &Look) -> Color {
         .sidebar
         .selected_fill
         .unwrap_or_else(|| k.alpha(k.c.bg_accent, 0.18))
+}
+
+/// The current row's hairline border: `sidebar.selected.border`, else transparent (none).
+pub fn selected_border(look: &Look) -> Color {
+    look.slots
+        .sidebar
+        .selected_border
+        .unwrap_or(Color::TRANSPARENT)
 }
 
 /// The current row's icon colour: `sidebar.selected.icon`, else `kit.c.icon_accent`.
@@ -109,8 +127,14 @@ pub const TOKENS: &[Token] = &[
     Token::length("sidebar.row.gap", row_gap, |l, v| {
         l.slots.sidebar.row_gap = Some(v)
     }),
+    Token::color("sidebar.row.icon", row_icon, |l, v| {
+        l.slots.sidebar.row_icon = Some(v)
+    }),
     Token::color("sidebar.selected.fill", selected_fill, |l, v| {
         l.slots.sidebar.selected_fill = Some(v)
+    }),
+    Token::color("sidebar.selected.border", selected_border, |l, v| {
+        l.slots.sidebar.selected_border = Some(v)
     }),
     Token::color("sidebar.selected.icon", selected_icon, |l, v| {
         l.slots.sidebar.selected_icon = Some(v)

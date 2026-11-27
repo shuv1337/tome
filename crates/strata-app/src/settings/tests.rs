@@ -299,3 +299,39 @@ fn explicit_corner_roundness_overrides_default_at_startup() {
         },
     );
 }
+
+#[test]
+fn fresh_startup_applies_s2_dark_default_theme_and_slot_refinements() {
+    in_own_process(
+        &format!("{MODULE}::fresh_startup_applies_s2_dark_default_theme_and_slot_refinements"),
+        &[],
+        || {
+            let settings = startup::load_settings();
+            let ui = UiThread::claim().expect("the UI thread");
+            let host = Offscreen::new(ui, settings);
+
+            assert_eq!(
+                shell::preferences(host.app()).theme,
+                strata_kit::theme::DEFAULT_ID
+            );
+            assert_eq!(
+                host.app().look.kit.c.bg_base,
+                strata_kit::theme::Rgba8::parse("#0c1119")
+                    .expect("hex")
+                    .color()
+            );
+            assert_eq!(
+                strata_kit::slots::collection::entry_icon(&host.app().look),
+                strata_kit::theme::Rgba8::parse("#7c8aa0")
+                    .expect("hex")
+                    .color()
+            );
+            assert_eq!(
+                strata_kit::slots::chrome::action_icon(&host.app().look),
+                strata_kit::theme::Rgba8::parse("#94a3b8")
+                    .expect("hex")
+                    .color()
+            );
+        },
+    );
+}

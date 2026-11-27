@@ -14,6 +14,7 @@ pub struct Columns {
     pub header_indicator: Option<f32>,
     pub header_title_opacity: Option<f32>,
     pub header_title_weight: Option<f32>,
+    pub header_inactive_title: Option<Color>,
     pub header_fill: Option<Color>,
     pub edge_width: Option<f32>,
     pub edge_opacity: Option<f32>,
@@ -55,6 +56,14 @@ pub fn header_title_font(look: &Look) -> TextStyle {
         weight: header_title_weight(look),
         ..look.kit.ty.ui_medium
     }
+}
+
+/// The inactive column header title's colour: `columns.header.inactive_title`, else `bg_accent` at [`header_title_opacity`].
+pub fn header_inactive_title(look: &Look) -> Color {
+    look.slots
+        .columns
+        .header_inactive_title
+        .unwrap_or_else(|| fade(look, look.kit.c.bg_accent, header_title_opacity(look)))
 }
 
 /// The active column header's fill: `columns.header.fill`, else the raised surface.
@@ -130,6 +139,11 @@ pub const TOKENS: &[Token] = &[
         900.0,
         header_title_weight,
         |l, v| l.slots.columns.header_title_weight = Some(v),
+    ),
+    Token::color(
+        "columns.header.inactive_title",
+        header_inactive_title,
+        |l, v| l.slots.columns.header_inactive_title = Some(v),
     ),
     Token::color("columns.header.fill", header_fill, |l, v| {
         l.slots.columns.header_fill = Some(v)

@@ -90,12 +90,12 @@ fn row<'a>(app: &'a App, rcx: &RowCx<'_>) -> Option<&'a Row> {
 
 fn mode(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::mode_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).mono().muted()
 }
 
 fn size(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::size_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 fn kind(app: &App, rcx: &RowCx<'_>) -> Cell {
@@ -108,27 +108,27 @@ fn kind(app: &App, rcx: &RowCx<'_>) -> Cell {
             row.name(),
         ))
     });
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 fn modified(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::modified_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 fn duration(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::duration_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 fn dimensions(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::dimensions_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 fn created(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::created_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    Cell::text(text.unwrap_or_default()).muted()
 }
 
 pub(super) fn cells_version(app: &App, rcx: &RowCx<'_>) -> u64 {

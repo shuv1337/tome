@@ -1,7 +1,9 @@
 # Theme data
 
-`catalog.toml` is Strata's bundled theme catalogue: 95 themes, each with nine interface
-colours and five syntax colours. strata-kit compiles it in (`src/theme/catalog.rs`) and maps
+`catalog.toml` is Strata's upstream bundled theme catalogue (95 themes), and
+`tome/catalog.toml` adds Tome's own bundled themes (starting with `s2-dark` /
+**S2Code Dark**, with colour-only token refinements in `tome/s2-dark.tokens.toml`).
+strata-kit compiles both in (`src/theme/catalog.rs`, 96 themes total) and maps
 each theme onto a `Look` (`src/theme/map.rs`).
 
 ## Source

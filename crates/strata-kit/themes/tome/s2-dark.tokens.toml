@@ -1,0 +1,32 @@
+# Colour-only token refinements for Tome's bundled `s2-dark` ("S2Code Dark") theme.
+# Applied after `theme::map::look` so the 95 upstream Strata themes stay unchanged.
+
+collection.entry.icon = "#7c8aa0"
+collection.selected.fill = "#1d2635"
+collection.selected.border = "#2a364a"
+collection.hover.fill = "alpha(#94a3b8, 0.08)"
+collection.active_path.fill = "#1d2635"
+collection.active_parent.fill = "#161d28"
+collection.peek.fill = "#161d28"
+
+columns.header.inactive_title = "#94a3b8"
+
+icons.frame.icon = "#7c8aa0"
+icons.frame.selected_fill = "#1d2635"
+icons.frame.selected_ring = "#2a364a"
+icons.frame.hover_fill = "alpha(#94a3b8, 0.08)"
+
+sidebar.row.icon = "#7c8aa0"
+sidebar.selected.fill = "#1d2635"
+sidebar.selected.border = "#2a364a"
+sidebar.hover.fill = "alpha(#94a3b8, 0.08)"
+
+chrome.action.icon = "#94a3b8"
+chrome.current.text = "#e6ebf2"
+
+color.layer_01 = "#161d28"
+color.surface_raised = "#161d28"
+color.surface_raised_base = "#161d28"
+color.hover = "alpha(#94a3b8, 0.08)"
+color.pressed = "alpha(#94a3b8, 0.14)"
+color.border_focus = "#6366f1"

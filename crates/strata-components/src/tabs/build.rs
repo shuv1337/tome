@@ -702,10 +702,11 @@ fn tab_label(label: &str, highlighted: bool, look: &Look) -> El {
         .truncate()
         .dir(rune::Direction::Auto)
         .a11y_hidden();
+    let active = strata_kit::slots::chrome::current_text(look);
     if highlighted {
-        text_el.color(k.c.text_accent)
+        text_el.color(active)
     } else {
-        text_el.color(k.c.text_muted).group_color(k.c.text_accent)
+        text_el.color(k.c.text_muted).group_color(active)
     }
 }
 

@@ -60,7 +60,7 @@ pub(super) fn strip<S: 'static>(shared: &Rc<Shared<S>>, resolved: &Rc<Resolved>,
 
 fn heading_font(kit: &rune_kit::Kit) -> rune::TextStyle {
     rune::TextStyle {
-        weight: 700.0,
+        weight: 600.0,
         ..kit.ty.small_medium
     }
 }

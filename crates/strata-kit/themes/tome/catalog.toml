@@ -1,0 +1,20 @@
+# Tome-owned bundled themes, merged with upstream `../catalog.toml` by `src/theme/catalog.rs`.
+# Keeping Tome themes here keeps `../catalog.toml` byte-identical to upstream `lgse/strata`.
+
+[[themes]]
+id = "s2-dark"
+name = "S2Code Dark"
+background = "#0c1119"
+surface = "#121923"
+text = "#e6ebf2"
+accent = "#7c83ff"
+danger = "#f87171"
+muted = "#1b232f"
+highlight = "#1d2635"
+border = "#242f40"
+dim_text = "#94a3b8"
+syntax_keyword = "#a5b4fc"
+syntax_string = "#34d399"
+syntax_constant = "#f59e0b"
+syntax_type = "#60a5fa"
+syntax_preprocessor = "#7dd3fc"

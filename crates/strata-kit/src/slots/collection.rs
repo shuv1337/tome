@@ -13,6 +13,10 @@ pub struct Collection {
     pub cut_opacity: Option<f32>,
     pub drag_opacity: Option<f32>,
     pub file_icon_opacity: Option<f32>,
+    pub entry_icon: Option<Color>,
+    pub selected_fill: Option<Color>,
+    pub selected_border: Option<Color>,
+    pub hover_fill: Option<Color>,
     pub peek_fill: Option<Color>,
     pub active_path_fill: Option<Color>,
     pub active_parent_fill: Option<Color>,
@@ -39,6 +43,35 @@ pub fn drag_opacity(look: &Look) -> f32 {
 
 pub fn file_icon_opacity(look: &Look) -> f32 {
     look.slots.collection.file_icon_opacity.unwrap_or(0.72)
+}
+
+/// Default entry icon colour: `collection.entry.icon`, else `kit.c.icon_accent`.
+pub fn entry_icon(look: &Look) -> Color {
+    look.slots
+        .collection
+        .entry_icon
+        .unwrap_or(look.kit.c.icon_accent)
+}
+
+/// Selected row fill: `collection.selected.fill`, else `rune_kit::TableStyle::from_kit(&look.kit).selected`.
+pub fn selected_fill(look: &Look) -> Color {
+    look.slots
+        .collection
+        .selected_fill
+        .unwrap_or_else(|| rune_kit::TableStyle::from_kit(&look.kit).selected)
+}
+
+/// Selected row hairline border: `collection.selected.border`, else transparent (none).
+pub fn selected_border(look: &Look) -> Color {
+    look.slots
+        .collection
+        .selected_border
+        .unwrap_or(Color::TRANSPARENT)
+}
+
+/// Hovered row fill: `collection.hover.fill`, else `kit.c.hover`.
+pub fn hover_fill(look: &Look) -> Color {
+    look.slots.collection.hover_fill.unwrap_or(look.kit.c.hover)
 }
 
 pub fn peek_fill(look: &Look) -> Color {
@@ -82,6 +115,18 @@ pub const TOKENS: &[Token] = &[
         file_icon_opacity,
         |l, v| l.slots.collection.file_icon_opacity = Some(v),
     ),
+    Token::color("collection.entry.icon", entry_icon, |l, v| {
+        l.slots.collection.entry_icon = Some(v)
+    }),
+    Token::color("collection.selected.fill", selected_fill, |l, v| {
+        l.slots.collection.selected_fill = Some(v)
+    }),
+    Token::color("collection.selected.border", selected_border, |l, v| {
+        l.slots.collection.selected_border = Some(v)
+    }),
+    Token::color("collection.hover.fill", hover_fill, |l, v| {
+        l.slots.collection.hover_fill = Some(v)
+    }),
     Token::color("collection.peek.fill", peek_fill, |l, v| {
         l.slots.collection.peek_fill = Some(v)
     }),

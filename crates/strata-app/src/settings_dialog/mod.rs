@@ -702,7 +702,11 @@ fn compact_search_button(app: &App) -> El {
             c.icon_accent,
         )
     } else {
-        (Color::TRANSPARENT, c.hover, kit.alpha(c.icon_accent, 0.65))
+        (
+            Color::TRANSPARENT,
+            c.hover,
+            kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.75),
+        )
     };
     let label = tr("Search settings");
     let mut btn = el()
@@ -799,7 +803,7 @@ fn nav_colors(look: &strata_kit::look::Look, active: bool) -> NavColors {
         NavColors {
             fill: Color::TRANSPARENT,
             hover: c.hover,
-            icon: kit.alpha(c.icon_accent, 0.65),
+            icon: kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.75),
             title: c.text_muted,
             subtitle: c.text_muted,
         }

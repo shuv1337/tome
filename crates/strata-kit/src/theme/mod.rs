@@ -8,6 +8,7 @@ mod map;
 pub mod omarchy;
 mod switch;
 pub mod syntax;
+mod tome;
 
 pub use catalog::{DEFAULT_ID, UNKNOWN_ID_FALLBACK, bundled, bundled_theme};
 pub use color::Rgba8;

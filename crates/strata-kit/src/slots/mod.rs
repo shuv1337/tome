@@ -5,6 +5,7 @@ use crate::tokens::Token;
 #[cfg(doc)]
 use crate::look::Look;
 
+pub mod chrome;
 pub mod collection;
 pub mod columns;
 pub mod icons;
@@ -21,6 +22,7 @@ mod tests;
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Slots {
+    pub chrome: chrome::Chrome,
     pub collection: collection::Collection,
     pub columns: columns::Columns,
     pub icons: icons::Icons,
@@ -32,6 +34,7 @@ pub struct Slots {
 }
 
 pub const TOKENS: &[(&str, &[Token])] = &[
+    ("chrome", chrome::TOKENS),
     ("collection", collection::TOKENS),
     ("columns", columns::TOKENS),
     ("icons", icons::TOKENS),

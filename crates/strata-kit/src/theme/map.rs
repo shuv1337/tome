@@ -11,7 +11,9 @@ mod tests;
 
 impl Theme {
     pub fn look(&self) -> Look {
-        look(&self.colors)
+        let mut look = look(&self.colors);
+        super::tome::refine(self, &mut look);
+        look
     }
 
     /// The theme's kit, as [`Theme::look`] holds it.

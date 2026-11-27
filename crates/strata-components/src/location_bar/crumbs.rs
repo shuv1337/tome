@@ -158,7 +158,7 @@ fn ancestor<S: 'static>(cx: &Ctx<'_, S>, i: usize, crumb: &Crumb) -> El {
     if let Some(badge) = crumb.badge {
         button = button.child(
             icon(look.icon(badge), look.icon_size.sm)
-                .color(k.c.icon_accent)
+                .color(strata_kit::slots::chrome::action_icon(look))
                 .a11y_hidden(),
         );
     }
@@ -256,12 +256,16 @@ fn copy_path_button<S: 'static>(cx: &Ctx<'_, S>, fade: Anim) -> El {
         .child(
             icon(look.icon(icon_name), look.icon_size.md)
                 .key("icon")
-                .color(k.c.icon_accent)
+                .color(if copied {
+                    k.c.icon_accent
+                } else {
+                    strata_kit::slots::chrome::action_icon(look)
+                })
                 .a11y_hidden(),
         )
 }
 
-/// The current folder: a label in the accent, and the Copy path button.
+/// The current folder: a label in the current-text tone, and the Copy path button.
 fn current<S: 'static>(cx: &Ctx<'_, S>, crumb: &Crumb, n: usize) -> El {
     let look = cx.look;
     let k = &look.kit;
@@ -281,14 +285,14 @@ fn current<S: 'static>(cx: &Ctx<'_, S>, crumb: &Crumb, n: usize) -> El {
     if let Some(badge) = crumb.badge {
         name = name.child(
             icon(look.icon(badge), look.icon_size.sm)
-                .color(k.c.icon_accent)
+                .color(strata_kit::slots::chrome::action_icon(look))
                 .a11y_hidden(),
         );
     }
     name = name.child(
         text(elide_middle(&crumb.label, CRUMB_CHARS).into_owned())
             .font(k.ty.ui_medium)
-            .color(k.c.text_accent)
+            .color(strata_kit::slots::chrome::current_text(look))
             .label(crumb.label.clone())
             .description(crumb.description.clone()),
     );
