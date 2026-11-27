@@ -61,7 +61,7 @@ the package repository.
 
 %prep
 %autosetup -n strata-@TAG_VERSION@ -a1 -p1
-%cargo_prep -v vendor
+%cargo_prep -v rpm-vendor
 if [ -f vendor-git-config.toml ]; then
     cat vendor-git-config.toml >> .cargo/config.toml
 fi

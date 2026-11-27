@@ -8,6 +8,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - crates/*/Cargo.toml
+      - vendor/**
       - tests/container/**
       - scripts/image_inputs.py
       - scripts/image_registry.py

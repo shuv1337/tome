@@ -74,6 +74,7 @@ ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
 COPY tests/container/stub-workspace.py /opt/strata-stub-workspace.py
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+COPY vendor vendor
 # Each workspace crate is reduced to its manifest and empty targets: no source or build
 # script of Strata's runs here. What the stubs built is then removed, and the stage fails if
 # any of it is left, so that a run can only compile the real crates. The Cargo home tells

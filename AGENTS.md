@@ -219,14 +219,27 @@ its thin binary entrypoint.
 
 ### Rune
 
-- Rune is pre-release and takes no pull requests. When Rune core lacks something,
-  file an issue upstream with a headless repro, or add a thin shim in
-  `strata-platform` that names the issue. Never vendor or patch Rune.
-- Every Rune crate pins the same `dev` rev in the root `Cargo.toml` (along with
-  its `[patch.crates-io]` entries). Move the rev on purpose in its own change, and
-  update the Rust version in `mise.toml` and `tests/container/Dockerfile` with it.
-- Rune's API reference is `crates/rune/README.md` and `crates/rune-kit/README.md`
-  at the pinned rev. Read them there, not from memory.
+- Rune is pre-release and takes no pull requests. Report upstream bugs as issues
+  with a headless repro, or add a thin shim in `strata-platform` that names the
+  issue.
+- **Tome vendors `crates/rune` under `vendor/rune/crates/rune/`** (diverging
+  intentionally from upstream Strata's no-vendoring policy) so Tome can carry
+  local patches without waiting for upstream Strata to repin. The root
+  `Cargo.toml` overrides `rune` with `[patch."https://github.com/anomalyco/rune"]`
+  (matching the exact git URL, without `.git`).
+- `vendor/rune/README.md` is the source of truth for the pinned base rev,
+  active local patches, and how to add, drop, or rebase patches.
+- Every Rune crate (`rune`, `rune-kit`, `rune-fx`), `vendor/rune/crates/rune/Cargo.toml`'s
+  internal Rune dependencies, and the root `[patch.crates-io]` entries must pin
+  the same `dev` rev. When merging an upstream Strata repin, rebase
+  `vendor/rune/crates/rune/` onto that rev, drop patches upstream now includes,
+  re-apply remaining local patches, update all `rev =` entries together, and
+  update the Rust version in `mise.toml` and `tests/container/Dockerfile` if
+  changed. Keep vendored Rune changes isolated to `Cargo.toml`, `Cargo.lock`,
+  `vendor/`, and Rune docs so upstream merges stay clean.
+- Rune's API reference is `vendor/rune/crates/rune/README.md` (and
+  `crates/rune-kit/README.md` at the pinned rev). Read them there, not from
+  memory.
 
 ### Tests and gallery
 

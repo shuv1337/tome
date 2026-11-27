@@ -31,13 +31,14 @@ ASSET_LICENSES = ("Apache-2.0", "ISC", "MIT", "OFL-1.1")
 # unrar_sys bundles the UnRAR source, whose license Fedora and COPR do not allow.
 FORBIDDEN_CRATES = ("unrar", "unrar_sys")
 STUB_FILES = {"Cargo.toml", ".cargo-checksum.json", "src/lib.rs"}
+VENDOR_DIR_NAME = "rpm-vendor"
 VENDOR_GIT_CONFIG_NAME = "vendor-git-config.toml"
-VENDOR_CONFIG = """\
+VENDOR_CONFIG = f"""\
 [source.crates-io]
 replace-with = "vendored-sources"
 
 [source.vendored-sources]
-directory = "vendor"
+directory = "{VENDOR_DIR_NAME}"
 
 [net]
 offline = true
@@ -262,9 +263,9 @@ def require_updater_switch(source: pathlib.Path, tag: str) -> None:
 def split_git_crates(
     source: pathlib.Path, git_sources: dict[str, set[tuple[str, str]]]
 ) -> dict[pathlib.Path, str]:
-    """Moves each git source's crates out of `vendor/` into `vendor-git/<index>/`."""
+    """Moves each git source's crates out of `rpm-vendor/` into `vendor-git/<index>/`."""
     git_dirs: dict[pathlib.Path, str] = {}
-    vendor = source / "vendor"
+    vendor = source / VENDOR_DIR_NAME
     for index, git_source in enumerate(sorted(git_sources)):
         destination = source / "vendor-git" / str(index)
         destination.mkdir(parents=True)
@@ -300,7 +301,7 @@ def vendor_colliding_registry_crates(
                 actual = json.loads((vendored / ".cargo-checksum.json").read_text()).get("package")
                 if actual != expected_checksum:
                     raise PackagingError(f"checksum mismatch vendoring {name} {version}")
-            destination = source / "vendor" / f"{name}-{version}"
+            destination = source / VENDOR_DIR_NAME / f"{name}-{version}"
             if destination.exists():
                 raise PackagingError(f"vendor directory already contains {destination.name}")
             shutil.copytree(vendored, destination)
@@ -318,7 +319,7 @@ def run_vendor_filterer(
         "--no-default-features",
         "--keep-dep-kinds=no-dev",
         *platforms,
-        "vendor",
+        VENDOR_DIR_NAME,
     ]
     if not collisions:
         run(command, cwd=source)
@@ -330,7 +331,7 @@ def run_vendor_filterer(
         (staged / "Cargo.toml").write_text(patch_manifest_for_vendoring(manifest, collisions))
         run(["cargo", "metadata", "--offline", "--format-version", "1"], cwd=staged)
         run(command, cwd=staged)
-        shutil.move(str(staged / "vendor"), str(source / "vendor"))
+        shutil.move(str(staged / VENDOR_DIR_NAME), str(source / VENDOR_DIR_NAME))
 
 
 def verify_offline_metadata(source: pathlib.Path, git_config: str) -> None:
@@ -375,12 +376,12 @@ def vendor_crates(source: pathlib.Path, archive: pathlib.Path, stub_list: pathli
 
     git_dirs, git_config = _prepare_git_sources(source, git_sources, collisions)
     verify_offline_metadata(source, git_config)
-    stubs, forbidden = inspect_vendor(source / "vendor", git_dirs)
+    stubs, forbidden = inspect_vendor(source / VENDOR_DIR_NAME, git_dirs)
     if forbidden:
         raise PackagingError(f"vendored sources include non-free crates: {forbidden}")
     stub_list.write_text("".join(f"{stub}\n" for stub in stubs))
 
-    members = ["vendor", "vendor-git", VENDOR_GIT_CONFIG_NAME] if git_sources else ["vendor"]
+    members = [VENDOR_DIR_NAME, "vendor-git", VENDOR_GIT_CONFIG_NAME] if git_sources else [VENDOR_DIR_NAME]
     run(
         [
             "tar",

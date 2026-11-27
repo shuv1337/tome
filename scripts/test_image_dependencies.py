@@ -9,7 +9,7 @@ import tempfile
 import tomllib
 import unittest
 
-from image_inputs import IMAGE_INPUTS, REPOSITORY, crate_manifests
+from image_inputs import IMAGE_INPUTS, REPOSITORY, crate_manifests, dependency_key, source_key, vendor_files
 
 CONTAINER = REPOSITORY / "tests/container"
 HASH = "0123456789abcdef"
@@ -171,6 +171,33 @@ class RecipeTests(unittest.TestCase):
         recipe = stage()
         self.assertIn('auto-clean-frequency = "never"', recipe)
         self.assertLess(recipe.index("auto-clean-frequency"), recipe.index("mv "))
+
+    def test_vendored_crates_are_included_in_the_image_context_and_cache_keys(self):
+        ignored = (REPOSITORY / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("!vendor/", ignored)
+        self.assertIn("!vendor/**", ignored)
+        recipe = stage()
+        self.assertIn("COPY vendor vendor", recipe)
+        self.assertLess(recipe.index("COPY vendor vendor"), recipe.index("cargo fetch"))
+        publisher = (REPOSITORY / ".github/workflows/test-image.yml").read_text(encoding="utf-8")
+        self.assertIn("- vendor/**", publisher)
+        self.assertIn(REPOSITORY / "vendor/rune/crates/rune/Cargo.toml", vendor_files(REPOSITORY))
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            for path in IMAGE_INPUTS:
+                target = repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("x", encoding="utf-8")
+            for name in ("Cargo.toml", "Cargo.lock", ".dockerignore"):
+                (repo / name).write_text("x", encoding="utf-8")
+            (repo / "crates").mkdir()
+            vendored = repo / "vendor/rune/crates/rune/src/lib.rs"
+            vendored.parent.mkdir(parents=True)
+            vendored.write_text("pub fn v1() {}\n", encoding="utf-8")
+            dep_before, src_before = dependency_key(repo), source_key(repo)
+            vendored.write_text("pub fn v2() {}\n", encoding="utf-8")
+            self.assertNotEqual(dependency_key(repo), dep_before)
+            self.assertNotEqual(source_key(repo), src_before)
 
 
 if __name__ == "__main__":
