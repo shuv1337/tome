@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from build_srpm import (
+    VENDOR_DIR_NAME,
     build_kind,
     git_vendor_config,
     inspect_vendor,
@@ -17,6 +18,7 @@ from build_srpm import (
     patch_manifest_for_vendoring,
     require_updater_switch,
     rpm_version,
+    split_git_crates,
     vendor_config,
 )
 from update_aur import PackagingError
@@ -223,6 +225,24 @@ class GitVendorConfigTests(unittest.TestCase):
         without_patch = patch_manifest_for_vendoring('[package]\nname = "demo"\n', collisions)
         self.assertIn("[patch.crates-io]", without_patch)
         self.assertIn(expected, without_patch)
+
+    def test_generated_rpm_vendor_dir_stays_separate_from_checked_in_vendor_rune(self):
+        self.assertNotEqual(VENDOR_DIR_NAME, "vendor")
+        self.assertIn(f'directory = "{VENDOR_DIR_NAME}"', vendor_config())
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            # Checked-in vendored Rune has no Cargo.toml directly under vendor/rune/.
+            (root / "vendor" / "rune" / "crates" / "rune").mkdir(parents=True)
+            (root / "vendor" / "rune" / "crates" / "rune" / "Cargo.toml").write_text(
+                '[package]\nname = "rune"\nversion = "0.0.1"\n'
+            )
+            generated = root / VENDOR_DIR_NAME / "rune-core"
+            generated.mkdir(parents=True)
+            (generated / "Cargo.toml").write_text('[package]\nname = "rune-core"\nversion = "0.0.1"\n')
+            git_dirs = split_git_crates(root, {self.GIT_SOURCE: {("rune-core", "0.0.1")}})
+            self.assertEqual(list(git_dirs.values()), [self.GIT_SOURCE])
+            self.assertTrue((root / "vendor-git" / "0" / "rune-core" / "Cargo.toml").is_file())
+            self.assertTrue((root / "vendor" / "rune" / "crates" / "rune" / "Cargo.toml").is_file())
 
 
 if __name__ == "__main__":

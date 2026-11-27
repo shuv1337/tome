@@ -12,4 +12,6 @@ crates/*/*
 !tests/
 !tests/container/
 !tests/container/**
+!vendor/
+!vendor/**
 **/__pycache__

@@ -35,18 +35,30 @@ def crate_manifests(repository=REPOSITORY):
     return sorted((repository / "crates").rglob("Cargo.toml"))
 
 
+def vendor_files(repository=REPOSITORY):
+    """Every checked-in file under vendor/, included in the dependency stage and cache keys."""
+    vendor = repository / "vendor"
+    if not vendor.is_dir():
+        return []
+    return sorted(path for path in vendor.rglob("*") if path.is_file())
+
+
 def dependency_key(repository=REPOSITORY):
     inputs = [image_key(repository)] + [digest(repository / name)
                                        for name in ("Cargo.toml", "Cargo.lock", ".dockerignore")]
     for manifest in crate_manifests(repository):
         inputs.extend((str(manifest.relative_to(repository)), digest(manifest)))
+    for path in vendor_files(repository):
+        inputs.extend((str(path.relative_to(repository)), digest(path)))
     return hashlib.sha256("".join(inputs).encode()).hexdigest()
 
 
 def source_key(repository=REPOSITORY):
     files = [repository / name for name in ("Cargo.toml", "Cargo.lock")]
-    for directory in ("src", "data", "crates"):
-        files.extend(path for path in (repository / directory).rglob("*") if path.is_file())
+    for directory in ("src", "data", "crates", "vendor"):
+        root = repository / directory
+        if root.is_dir():
+            files.extend(path for path in root.rglob("*") if path.is_file())
     inputs = [(str(path.relative_to(repository)), digest(path)) for path in sorted(files)]
     return hashlib.sha256(json.dumps(inputs).encode()).hexdigest()
 
