@@ -11,6 +11,7 @@ use gpu::Draw;
 
 mod app;
 mod cpu_canvas;
+mod file_dialog;
 mod frame;
 mod full_faces;
 mod gpu;
@@ -21,6 +22,8 @@ mod page;
 mod page_fonts;
 mod pipelines;
 pub(crate) mod platform;
+mod recovery;
+mod web_images;
 pub(crate) use rune_text::segmenter;
 
 thread_local! {
@@ -84,6 +87,10 @@ enum Wake {
     StartGpu(crate::machine::Attempt),
     /// A CPU-first WebGPU probe failed; defer WebGL2 fallback until quiet or stay on CPU.
     WebGpuFailed,
+    /// Scheduled WebGPU device-loss recovery backoff expired (`Browser::on_webgpu_recover_due`).
+    WebGpuRecover(crate::machine::Attempt),
+    /// Async WebGPU device-loss re-acquisition answered (`Browser::on_webgpu_recovered`).
+    WebGpuRecovered(crate::machine::Attempt),
     /// An async browser WebGPU error-scope check (`uber_check` or feature breaker) answered.
     GpuCheck,
     /// The empty-queue barrier after `Renderer::try_new` resolved (`HandoverEvent::Built`).
@@ -152,7 +159,8 @@ fn spawn(mut app: PendingApp) -> Result<(), String> {
     event_loop.spawn_app(Browser { app: Some(app), shared, proxy, resize_redraw, window: None, embedded: false, document: false, owns_canvas: true,
         borrowed: page::Borrowed::default(), start: Start::GpuFirst, fonts: Rc::default(), pending: Rc::default(), warmed: Rc::default(), running: Rc::default(),
         gpu_loss_policy: crate::GpuLossPolicy::Recover, terminal_failed: false, terminal_poll_pending: false,
-        lost: Rc::default(), webgl_watch: None, webgl_restored: Rc::default(), webgl_restoring: false, waiting: None,
+        on_gpu_fallback: None, webgpu_recovery: (crate::machine::Seq::default(), web_math::gpu_recovery::WebGpuRecovery::default()),
+        pending_webgpu_recovery: Rc::default(), lost: Rc::default(), webgl_watch: None, webgl_restored: Rc::default(), webgl_restoring: false, waiting: None,
         gpu_startup: (crate::machine::Seq::default(), web_math::GpuStartup::default()), webgpu_err: Rc::default() });
     Ok(())
 }
@@ -191,6 +199,12 @@ struct Browser {
     terminal_failed: bool,
     /// One-shot `AppSpec::poll` wake owed after entering terminal GPU failure.
     terminal_poll_pending: bool,
+    /// Configured `App::on_gpu_fallback` hook, run on permanent GPU fallback or exhausted recovery.
+    on_gpu_fallback: Option<crate::app::OnGpuFallback>,
+    /// Bounded WebGPU device-loss recovery state machine (`GpuLossPolicy::Recover`).
+    webgpu_recovery: (crate::machine::Seq, web_math::gpu_recovery::WebGpuRecovery),
+    /// Replacement WebGPU device answered by an async recovery probe, tagged with its `Attempt`.
+    pending_webgpu_recovery: Rc<RefCell<Option<(crate::machine::Attempt, Result<gpu::ReadyGpu, String>)>>>,
     /// Why the browser lost the GPU device or WebGL2 context, until `lost_device` handles it.
     lost: Rc<RefCell<Option<gpu::Loss>>>,
     /// Active `webglcontextlost` / `webglcontextrestored` listeners once WebGL2 has run on the canvas.
@@ -223,11 +237,16 @@ struct Running {
     document: bool,
     /// The first frame is on screen.
     presented: bool,
+    /// A non-degradable `NeedsGpu` frame blocked CPU painting, so GPU takeover must not wait for
+    /// `presented`.
+    cpu_blocked_on_gpu: bool,
     /// What the GPU canvas currently shows, while nothing has invalidated it. A requested frame
     /// that would draw these same pixels skips acquiring a canvas texture and presenting.
     last_presented: Option<crate::window::Presented>,
     /// `App::on_ready`, which runs once that first frame is presented, as a window's does.
     on_ready: Option<crate::app::OnWindow>,
+    observability: crate::frame::stage::HostObservability,
+    frame_seq: u64,
     /// `App::font_url_later`'s fonts, fetched once that first frame is presented.
     late_fonts: Vec<String>,
     /// The app's fonts, which the page takes as its own once that first frame is presented
@@ -241,6 +260,7 @@ struct Running {
     _menus: crate::native_menu::MenuGuard,
     shortcuts: crate::shortcuts::Guard,
     input: input::Bridge,
+    web_images: web_images::WebImagesSync,
     clipboard: crate::clipboard::Client,
 }
 
@@ -308,7 +328,8 @@ impl Browser {
         let fonts = self.fonts.borrow_mut().take().unwrap_or_default();
         let mut terminal_init_error = None;
         let gpu = if gpu_first {
-            match self.pending.borrow_mut().take() {
+            let taken = self.pending.borrow_mut().take();
+            match taken {
                 Some(Ok(gpu)) => Some(gpu),
                 Some(Err(e)) => {
                     if self.gpu_loss_policy == crate::GpuLossPolicy::Terminal {
@@ -316,6 +337,7 @@ impl Browser {
                         None
                     } else {
                         self.shared.set_window_error(Some(e.clone()));
+                        self.notify_gpu_fallback(crate::GpuFallbackStage::Init, &e);
                         error(&e, window.canvas().as_ref(), self.embedded, self.document);
                         self.end(event_loop);
                         return;
@@ -355,7 +377,7 @@ impl Browser {
         let wake: crate::Waker = Arc::new(move || { proxy.send_event(Wake::App).ok(); });
         let live_proxy = self.proxy.clone();
         let live_wake: crate::Waker = Arc::new(move || { live_proxy.send_event(Wake::Live).ok(); });
-        let app::StartedWebApp { mut app, menus, shortcuts, fonts: spec_fonts } = pending.start(
+        let app::StartedWebApp { mut app, menus, shortcuts, fonts: spec_fonts, observability } = pending.start(
             fonts,
             (size.width as f32 / scale, size.height as f32 / scale),
             Env::new(dark, scale),
@@ -410,6 +432,7 @@ impl Browser {
                             Draw::TerminalFailed
                         } else {
                             self.shared.set_window_error(Some(e.clone()));
+                            self.notify_gpu_fallback(crate::GpuFallbackStage::Init, &e);
                             error(&e, window.canvas().as_ref(), self.embedded, self.document);
                             self.end(event_loop);
                             return;
@@ -435,13 +458,14 @@ impl Browser {
         app.rt_mut().set_touch_hold_policy(web_math::web_touch_hold_policy(input::live_touch_context_menu()));
         let input = input::Bridge::new(&window.canvas().unwrap(), Rc::downgrade(&self.running), window.clone(),
             input::Mode { embedded: self.embedded, fit_height, document });
-        *self.running.borrow_mut() = Some(Running { draw, app, shared: self.shared.clone(), input, clipboard,
+        *self.running.borrow_mut() = Some(Running { draw, app, shared: self.shared.clone(), input, web_images: Default::default(), clipboard,
             clock: crate::frame::clock::FrameClock::new(now), suspended: false, full_redraw: true, embedded: self.embedded,
-            document, presented: false, last_presented: None, band: None, size: physical, on_ready, late_fonts, fonts: page_fonts,
-            cursor, _menus: menus, shortcuts });
+            document, presented: false, cpu_blocked_on_gpu: false, last_presented: None, band: None, size: physical, on_ready, observability, frame_seq: 0,
+            late_fonts, fonts: page_fonts, cursor, _menus: menus, shortcuts });
         crate::marks::mark("web.started");
         if let Some(reason) = terminal_init_error {
-            self.enter_terminal_gpu_loss(reason);
+            self.enter_terminal_gpu_loss(reason.clone());
+            self.notify_gpu_fallback(crate::GpuFallbackStage::Init, &reason);
         } else {
             window.request_redraw();
         }
@@ -451,6 +475,7 @@ impl Browser {
 impl ApplicationHandler<Wake> for Browser {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() { return; }
+        self.on_gpu_fallback = self.app.as_mut().expect("app before canvas").on_gpu_fallback.take();
         let app = self.app.as_ref().expect("app before canvas");
         self.document = app.document;
         self.embedded = app.embedded;
@@ -507,10 +532,7 @@ impl ApplicationHandler<Wake> for Browser {
                 if let Some(body) = document.body() { body.style().set_property("margin", "0").ok(); }
             }
         } else if self.embedded {
-            let touch = if app.fit_height { "pan-y" } else { "none" };
-            canvas.style().set_css_text(&format!(
-                "display:block;width:100%;touch-action:{touch};outline:none;user-select:none;-webkit-user-select:none"
-            ));
+            platform::style_inline_canvas(&canvas, app.size.1, app.fit_height);
         } else {
             // No border/padding: winit's physical input and resize coordinates must match pixels.
             canvas.style().set_css_text("position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none;user-select:none;-webkit-user-select:none");
@@ -576,6 +598,8 @@ impl ApplicationHandler<Wake> for Browser {
             }
             Wake::StartGpu(attempt) => { self.gpu_startup_due(attempt); return; }
             Wake::WebGpuFailed => { self.webgpu_probe_failed(); return; }
+            Wake::WebGpuRecover(attempt) => { self.on_webgpu_recover_due(attempt); return; }
+            Wake::WebGpuRecovered(attempt) => { let _ = self.on_webgpu_recovered(event_loop, attempt); return; }
             Wake::GpuCheck => { self.on_gpu_check(); return; }
             Wake::HandoverBuilt => { self.on_handover_built(); return; }
             Wake::HandoverDone(attempt) => { self.on_handover_done(attempt); return; }
@@ -640,6 +664,7 @@ impl ApplicationHandler<Wake> for Browser {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 r.full_redraw = true;
+                if let Some(side) = r.draw.gpu_mut() { side.damage.reset(); }
                 r.resize_surface(window, window.inner_size(), scale_factor as f32);
                 self.resize_redraw.resized();
             }
@@ -697,6 +722,7 @@ impl ApplicationHandler<Wake> for Browser {
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
         self.shared.quitting.store(true, Ordering::Release);
+        self.cancel_webgpu_recovery();
         self.webgl_watch = None;
         let running = self.running.borrow_mut().take();
         if let Some(r) = running { r.close(); }

@@ -44,14 +44,15 @@ impl RuntimeCore {
         skip_paint: bool,
         loop_vis: bool,
         gliding: bool,
-        turned: bool,
+        turn_index: u32,
         caret: Option<[f32; 4]>,
         video_clock: crate::video::Clock,
         sel_ranges: &[(usize, usize, usize)],
         mark_ranges: &[(usize, usize, usize)],
         video_signature: &mut u64,
         glyph_count: &mut usize,
-    ) -> Option<usize> {
+    ) -> (Option<usize>, Option<usize>) {
+        let turned = turn_index != 0;
         let n = &self.tree.nodes[i];
         let mut faded_slot = None;
         // Disabled styling is distributed to each authored paint leaf at build time.
@@ -88,7 +89,7 @@ impl RuntimeCore {
         };
         #[cfg(not(any(test, all(target_os = "windows", feature = "windows-system-material"))))]
         let _ = material_draw;
-        let stuck_k = if self.tree.has_sticky { (self.scroll.stuck[i].abs() / sticky::SHADOW_RAMP).min(1.0) } else { 0.0 };
+        let stuck_k = self.stuck_shadow_alpha(i);
         let stuck_shadows: (f32, &[crate::el::Shadow]) = match &n.sticky {
             Some(s) if stuck_k > 0.0 => (stuck_k, &s.shadows),
             _ => (0.0, &[]),
@@ -422,7 +423,7 @@ impl RuntimeCore {
                     && n.vis.paint_alpha == 1.0 && bw == 0.0 && overlay == [0.0; 4]
                     && !n.vis.tracks_hover_paint() && !n.vis.tracks_press()
                     && self.instances.len() == primitive_start && n.text.is_none() && n.input.is_none()
-                    && n.vis.shape.is_none() && n.vis.pixels.is_none() && n.vis.effect.is_none()
+                    && n.vis.shape.is_none() && n.vis.pixels.is_none() && n.vis.web_image.is_none() && n.vis.effect.is_none()
                     && n.vis.shadows.is_empty() && n.handlers.get().is_none() && n.focus.get().is_none()
                     && !n.vis_flags.hit() && !turned && cover.is_none() && n.help.is_none()
                     && curve.stops.iter().all(|&(_, a)| a.is_finite() && a > 0.001 && a <= 1.0 && base[3] * a > 0.0005)
@@ -491,7 +492,9 @@ impl RuntimeCore {
         } else {
             clip
         };
-        self.paint_content(
+        let has_web_image = n.vis.cold.get().is_some_and(|c| c.web_image.is_some());
+        let web_border_inset = if border_a > 0.0005 || dashed.is_some() { padding } else { [0.0; 4] };
+        let text_start = self.paint_content(
             i,
             paint_content::LeafBox {
                 r,
@@ -530,7 +533,10 @@ impl RuntimeCore {
             mark_ranges,
             glyph_count,
         );
-        faded_slot
+        if has_web_image {
+            self.record_web_image(i, r, radii, web_border_inset, effective_opacity, pinh.clip, content_clip, turn_index);
+        }
+        (faded_slot, text_start)
     }
 }
 

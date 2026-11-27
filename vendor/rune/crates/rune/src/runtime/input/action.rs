@@ -206,6 +206,7 @@ pub(in crate::runtime) fn live_only_handler(action: &Action) -> Option<&'static 
         Action::Gesture(_, gesture_dispatch::Gesture::SmartMagnify(..)) => "on_smart_magnify",
         Action::Gesture(_, gesture_dispatch::Gesture::Button { .. }) => "on_button",
         Action::A11y(_, crate::a11y::actions::A11yAct::Delegate { .. }) => "on_a11y_action",
+        Action::A11y(_, crate::a11y::actions::A11yAct::CustomAction(_)) => "a11y_action",
         _ => return None,
     })
 }
@@ -272,6 +273,7 @@ pub(crate) fn merge(tx: &mut Tx, one: Tx) {
     tx.evict_memos.extend(one.evict_memos);
     tx.wakes.extend(one.wakes);
     tx.request_poll |= one.request_poll;
+    tx.urgent_frame |= one.urgent_frame;
     tx.text_flights.extend(one.text_flights);
     tx.launches.extend(one.launches);
     tx.unclipped_flights |= one.unclipped_flights;
@@ -623,9 +625,14 @@ impl RuntimeCore {
             }
             Action::Files(event) => self.run_files(app, event, &mut one),
             Action::Key { ev, repeat, stage } => {
-                if self.kbd.held_gate(None, Some(&ev.key), repeat) { return false; }
+                if self.kbd.held_gate(None, Some(&ev.key), repeat) {
+                    self.kbd.note_key_consumed(false);
+                    return false;
+                }
                 if ! matches!(ev.key, crate::Key::Modifier { .. }) { self.note_key_down(app, repeat); }
-                if stage { self.route_stage_key(app, &ev, &mut one) } else { self.route_key(app, &ev, repeat, &mut one) }
+                let ran = if stage { self.route_stage_key(app, &ev, &mut one) } else { self.route_key(app, &ev, repeat, &mut one) };
+                self.kbd.note_key_consumed(ran);
+                ran
             }
             Action::KeyUp(ev) => self.route_key_up(app, &ev, &mut one),
             Action::Wheel { gesture, chain, ev, phased } => self.run_wheel(app, gesture, chain, ev, phased, &mut one),

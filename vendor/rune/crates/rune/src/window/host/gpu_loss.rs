@@ -258,6 +258,7 @@ impl Host {
             w.alpha = None;
             w.corners = None;
             w.presented = None;
+            w.damage.reset();
             w.surface_ok = false;
             #[cfg(target_os = "macos")]
             { w.native.prime.stop(); }
@@ -270,13 +271,11 @@ impl Host {
                 }
                 w.native.video_layers.release(w.native.mode.handover());
                 w.native.slot.reset();
-                w.native.damage.reset();
                 let _ = w.native.poll_pace.step(crate::window::poll_pace::PollPaceEvent::Reset);
             }
             drop(w.surface.take());
         }
-        #[cfg(target_os = "macos")]
-        self.frame_presented.reset();
+        self.reset_frame_presented();
         self.gpu = None;
         self.app.release_compositor_gpu();
         #[cfg(any(test, target_os = "macos"))]
@@ -332,6 +331,7 @@ impl Host {
             self.clipboard.flush_core(self.app.rt_mut());
         }
         if let Some(position) = requests.position { self.set_position(event_loop, position); }
+        if let Some(position) = requests.logical_position { self.set_logical_position(event_loop, position); }
         if let Some(place) = requests.place { self.place(event_loop, place); }
         if let Some(request) = requests.window {
             match request {
@@ -398,10 +398,10 @@ impl Host {
         w.alpha = None;
         w.corners = None;
         w.presented = None;
+        w.damage.reset();
         #[cfg(target_os = "windows")]
         {
             w.native.slot.reset();
-            w.native.damage.reset();
         }
         drop(w.surface.take());
         #[cfg(target_os = "windows")]
@@ -477,8 +477,9 @@ impl Host {
         w.surface_ok = true;
         w.alpha = alpha;
         w.backoff_step(BackoffEvent::Lapsed);
+        w.damage.reset();
         #[cfg(target_os = "windows")]
-        { w.native.slot.reset(); w.native.damage.reset(); w.native.mode.rebind(); }
+        { w.native.slot.reset(); w.native.dxgi_present.reset(); w.native.mode.rebind(); }
         #[cfg(target_os = "macos")]
         { w.native.present = present; w.native.prime.stop(); }
         self.sync_window_backdrop(true);
@@ -560,6 +561,7 @@ pub(in crate::window) fn classify_latched_wake_event(event: &crate::window::Wake
         WakeEvent::Window(_, WindowRequest::Close | WindowRequest::Hide) => LatchedWakeAction::CloseOrHide,
         WakeEvent::Focus(_)
         | WakeEvent::Position(_, _)
+        | WakeEvent::LogicalPosition(_, _)
         | WakeEvent::Place(_, _)
         | WakeEvent::Level(_, _)
         | WakeEvent::ExcludeFromCapture(_, _)

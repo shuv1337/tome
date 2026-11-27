@@ -50,7 +50,7 @@ impl OverlayCore {
     }
 
     pub(super) fn wake_deadline(&self, rt: &RuntimeCore) -> Option<Instant> {
-        if self.gpu_loss_failed() { return None; }
+        if self.closed || self.gpu_loss_failed() { return None; }
         // A running display link consumes due runtime timers. Keep the independent
         // pointer deadline, but do not spin on an overdue animation timer. Without one (hidden,
         // covered, faded out or unpaced), a timer due sooner than a frame waits a frame.
@@ -75,6 +75,7 @@ impl OverlayCore {
         }).flatten()).min();
         deadline.into_iter().chain(self.backoff.deadline().filter(|_| self.presence.drawing())).chain(self.presence.deadline())
             .chain(self.hidden_pace.deadline().filter(|_| !self.presence.drawing()))
+            .chain(self.activation_tokens.deadline())
             .chain(self.rest.deadline())
             .chain(self.retire.deadline()).min()
     }
@@ -111,11 +112,20 @@ impl OverlayCore {
         self.clipboard.connect(wake.clone());
         self.popup.connect(wake.clone());
         self.gpu_pool = gpu;
-        *self.shared.wake.lock().unwrap() = Some(wake.clone());
+        {
+            let mut slot = self.shared.wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.shared.is_closed() {
+                drop(slot);
+                self.close_host(app);
+                return;
+            }
+            *slot = Some(wake.clone());
+        }
         self.connect_terminal_gpu_wake();
         let rerun = || -> Waker {
             let shared = self.shared.clone();
             Arc::new(move || {
+                if shared.is_closed() { return; }
                 let first = !std::mem::replace(&mut shared.requests.lock().unwrap().woken, true);
                 if first { shared.wake(); }
             })
@@ -129,11 +139,34 @@ impl OverlayCore {
         // Requests made before the loop existed.
         wake();
     }
+
+    /// Marks the overlay finished after `OverlayHandle::close`, tearing down its native surface,
+    /// cancelling pending callbacks/menus, and clearing its handle's waker so the event loop
+    /// drops the host in `cleanup`.
+    pub(super) fn close_host(&mut self, app: &mut dyn OverlayApp) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
+        *self.shared.wake.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.close_tokens();
+        app.close_after_hidden();
+        self.cancel_after_hidden(app);
+        self.drop_injected_pointers();
+        app.popup_cancel(&mut self.popup);
+        self.hide(app);
+        self.release();
+        self.set_availability(Availability::Unavailable);
+    }
 }
 
 impl AnyHost for OverlayHost {
+    fn finished(&self) -> bool {
+        self.core.closed
+    }
+
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        if self.core.poll_terminal_gpu_loss(&mut *self.app) { return; }
+        if self.core.closed || self.core.poll_terminal_gpu_loss(&mut *self.app) { return; }
         self.core.after_hidden_new_turn(&mut *self.app);
         self.core.meter.turn(matches!(cause, StartCause::ResumeTimeReached { .. } | StartCause::Poll), crate::frame::surface_stats::slept(cause));
         self.core.turn_frame.step(frame::TurnEvent::NewEvents);
@@ -164,6 +197,7 @@ impl AnyHost for OverlayHost {
     }
 
     fn terminate(&mut self) {
+        self.core.close_tokens();
         self.core.close_after_hidden(&mut *self.app);
     }
 
@@ -183,6 +217,8 @@ impl AnyHost for OverlayHost {
             let rt = self.app.rt_mut();
             rt.set_system_contrast(contrast);
             rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(contrast.is_some()));
+            rt.set_system_text_scale(crate::platform::text_scale::current());
+            rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency());
         }
         if let Some(live) = self.core.surface.live_mut() {
             let redraw = live.materials.on_policy_changed(effects, live.handover.as_mut());
@@ -202,8 +238,12 @@ impl AnyHost for OverlayHost {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeEvent) {
+        if self.core.shared.is_closed() {
+            self.core.close_host(&mut *self.app);
+            return;
+        }
         if self.core.poll_terminal_gpu_loss(&mut *self.app) {
-            self.core.drain_tokens_none();
+            self.core.close_tokens();
             self.core.close_after_hidden(&mut *self.app);
             return;
         }
@@ -245,7 +285,7 @@ impl AnyHost for OverlayHost {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let core = &mut self.core;
         let app = &mut *self.app;
-        if core.poll_terminal_gpu_loss(app) { return; }
+        if core.closed || core.poll_terminal_gpu_loss(app) { return; }
         if !matches!(event, WindowEvent::RedrawRequested) { core.meter.waited(); }
         #[cfg(target_os = "windows")]
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) {
@@ -320,8 +360,16 @@ impl AnyHost for OverlayHost {
             && !core.pointer_owner.captured_by_injected()
             && let Some(x11) = &core.x11 { x11.request_keys(); }
         use crate::input::host_events;
-        if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. })
-            && (app.rt().touching() || host_events::touch_promoted()) { return; }
+        if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. }) {
+            let (drop_event, dirty) = host_events::drop_touch_promoted_mouse(
+                app.rt_mut(),
+                !matches!(event, WindowEvent::CursorLeft { .. }),
+            );
+            if drop_event {
+                core.dirty |= dirty;
+                return;
+            }
+        }
         let input_enabled = core.options.input.resolved(core.interactive) != OverlayInput::None;
         match event {
             WindowEvent::Moved(_) => {
@@ -361,10 +409,15 @@ impl AnyHost for OverlayHost {
                 // A new accent, scroller style or Linux portal preference asks every window to redraw.
                 core.accent_changed(app.rt_mut(), crate::system_accent());
                 core.scroll_bars_changed(app.rt_mut(), crate::platform::scroll_bars::current());
+                app.rt_mut().set_system_text_scale(crate::platform::text_scale::cached());
+                #[cfg(target_os = "windows")]
+                app.rt_mut().sync_windows_tablet_mode_if_changed();
                 #[cfg(target_os = "linux")]
                 {
                     let rt = app.rt_mut();
                     rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
+                    let has_contrast = rt.system_contrast().is_some();
+                    rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(has_contrast));
                     rt.double_click_interval = crate::platform::preferences::double_click_interval();
                 }
                 core.dirty = true;
@@ -407,23 +460,39 @@ impl AnyHost for OverlayHost {
                 core.dirty = true;
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if core.options.keys.takes_keys() => {
-                if event.state == winit::event::ElementState::Pressed
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if crate::platform::wayland::serial::wire::has_listeners() {
+                    crate::platform::wayland::serial::wire::drain_all();
+                }
+                let queued = if event.state == winit::event::ElementState::Pressed
                     && let Some(window) = core.live_window().cloned()
                     && let Some(text) = crate::platform::ime::take_direct_commit(&window)
                 {
                     host_events::ime(app.rt_mut(), &window, &mut core.ime, winit::event::Ime::Commit(text));
-                    core.dirty = true;
+                    true
                 } else {
-                    core.dirty |= app.keyboard(&event, core.mods);
+                    app.keyboard(&event, core.mods)
+                };
+                if queued {
+                    core.dirty = true;
+                    core.dispatch_immediate_keyboard(app);
                 }
             }
             WindowEvent::Ime(ime) if core.options.keys.takes_keys() => {
+                let is_commit = matches!(ime, winit::event::Ime::Commit(_));
                 if let Some(window) = core.live_window().cloned() {
                     host_events::ime(app.rt_mut(), &window, &mut core.ime, ime);
                     core.dirty = true;
+                    if is_commit {
+                        core.dispatch_immediate_keyboard(app);
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if crate::platform::wayland::serial::wire::has_listeners() {
+                    crate::platform::wayland::serial::wire::drain_all();
+                }
                 let pressed = state.is_pressed();
                 if pressed {
                     core.control_click = cfg!(target_os = "macos") && core.mods.control_key();
@@ -470,7 +539,14 @@ impl AnyHost for OverlayHost {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) -> bool {
         let core = &mut self.core;
         let app = &mut *self.app;
-        if core.poll_terminal_gpu_loss(app) { return false; }
+        if core.shared.is_closed() {
+            core.close_host(app);
+            return false;
+        }
+        if core.poll_terminal_gpu_loss(app) {
+            core.close_tokens();
+            return false;
+        }
         #[cfg(target_os = "macos")]
         {
             core.fn_key(app);
@@ -485,6 +561,7 @@ impl AnyHost for OverlayHost {
             let more = if core.has_cpu() { core.draw_cpu(app, Some(_event_loop)) } else { core.draw(app, Some(_event_loop)) };
             #[cfg(not(target_os = "windows"))]
             let more = core.draw(app, Some(_event_loop));
+            core.poll_activation_tokens(crate::time::now());
             core.poll_after_hidden(app);
             return core.a11y_turn(app.rt_mut()) || more;
         }
@@ -521,6 +598,11 @@ impl AnyHost for OverlayHost {
         let more = if core.has_cpu() { core.draw_cpu(app, Some(_event_loop)) } else { core.draw(app, Some(_event_loop)) };
         #[cfg(not(target_os = "windows"))]
         let more = core.draw(app, Some(_event_loop));
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if core.presence.shown() && crate::window::is_wayland(_event_loop) {
+            crate::platform::wayland::primary_selection::wire::ensure_for_event_loop(_event_loop);
+        }
+        core.poll_activation_tokens(crate::time::now());
         core.apply_cursor(app.rt());
         core.a11y_turn(app.rt_mut()) || more
     }
@@ -528,8 +610,10 @@ impl AnyHost for OverlayHost {
     fn has_live_wayland_layer(&self) -> bool {
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         return matches!(self.core.surface.live().map(|l| &l.backing), Some(Backing::Layer(layer)) if layer.is_live())
+            || self.core.has_live_pending_layer()
             || self.core.has_live_wayland_backdrop_watch()
-            || self.core.has_live_wayland_hide_sync();
+            || self.core.has_live_wayland_hide_sync()
+            || self.core.has_live_wayland_activation_tokens();
         #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
         false
     }
@@ -537,10 +621,18 @@ impl AnyHost for OverlayHost {
     fn has_pending_platform_events(&self) -> bool {
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         return matches!(self.core.surface.live().map(|l| &l.backing), Some(Backing::Layer(layer)) if layer.has_pending_events())
+            || self.core.has_pending_layer_events()
             || self.core.has_pending_wayland_backdrop_events()
-            || self.core.has_pending_wayland_hide_sync_events();
+            || self.core.has_pending_wayland_hide_sync_events()
+            || self.core.has_pending_wayland_activation_token_events();
         #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
         false
+    }
+
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn primary_selection_lost(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.app.rt_mut().primary_selection_lost();
     }
 
     fn keeps_loop(&self) -> bool {
@@ -557,6 +649,12 @@ impl PendingOverlay for OverlayHost {
     fn inherit_font_smoothing(&mut self, mode: crate::FontSmoothing) {
         OverlayHost::inherit_font_smoothing(self, mode);
     }
+    fn inherit_wheel_glide(&mut self, on: bool) {
+        OverlayHost::inherit_wheel_glide(self, on);
+    }
+    fn inherit_wheel_line(&mut self, points: Option<f32>) {
+        OverlayHost::inherit_wheel_line(self, points);
+    }
     fn set_prewarm_effects(&mut self, effects: crate::PrewarmEffects) {
         OverlayHost::set_prewarm_effects(self, effects);
     }
@@ -566,6 +664,14 @@ impl PendingOverlay for OverlayHost {
     #[cfg(test)]
     fn font_smoothing(&self) -> crate::FontSmoothing {
         self.app.rt().font_smoothing()
+    }
+    #[cfg(test)]
+    fn wheel_glide(&self) -> bool {
+        self.app.rt().wheel_glide()
+    }
+    #[cfg(test)]
+    fn wheel_line(&self) -> Option<f32> {
+        self.app.rt().wheel_line()
     }
     #[cfg(test)]
     fn gpu_loss_latch(&self) -> Option<Arc<crate::render::loss_latch::GpuLossLatch>> {

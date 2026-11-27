@@ -58,12 +58,20 @@ impl FrameHost for OverlayFrame<'_> {
     fn gate(&mut self) -> Gate {
         if self.core.poll_terminal_gpu_loss(self.app) { return Gate::Skip; }
         let timer = !self.core.quiet.step(frame::QuietEvent::FrameStarts).is_empty();
+        self.core.poll_pending_layer(self.app);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Some(Live { backing: Backing::Layer(layer), .. }) = self.core.surface.live_mut() {
             let changes = layer.dispatch();
-            if changes.closed {
-                let reason = layer.close_reason().map(str::to_owned);
-                self.core.layer_closed(self.app, reason.as_deref());
+            if let Some(kind) = changes.closed {
+                match kind {
+                    crate::platform::layer_shell_machine::readiness::CloseKind::Closed => {
+                        let reason = layer.close_reason().map(str::to_owned);
+                        self.core.layer_closed(self.app, reason.as_deref());
+                    }
+                    crate::platform::layer_shell_machine::readiness::CloseKind::OutputGone => {
+                        self.core.layer_output_gone(self.app);
+                    }
+                }
                 return Gate::Skip;
             }
             for input in changes.input { self.core.surface_input(self.app, input); }
@@ -152,9 +160,14 @@ impl FrameHost for OverlayFrame<'_> {
         }
         #[cfg(target_os = "macos")]
         { self.presume = !self.prewarm && self.core.prime.presumes(); }
+        let urgent = self.app.rt_mut().take_urgent_frame();
         let (Some(live), Some(renderer)) = (self.core.surface.live_mut(), self.core.renderer.as_ref()) else {
             return Gate::Skip;
         };
+        #[cfg(target_os = "macos")]
+        if urgent && !self.prewarm && let Some(pacing) = live.pacing.as_mut() { pacing.admit_once(); }
+        #[cfg(not(target_os = "macos"))]
+        let _ = urgent;
         // Only a timer woke the resting overlay: build the frame first, and take neither a
         // drawable nor a display tick when it draws what's on screen. The link, stopped, would
         // draw it at once anyway (`defers_start`).
@@ -295,6 +308,7 @@ impl FrameHost for OverlayFrame<'_> {
         } else {
             step(self.app, &mut self.core.clock, frame_time, self.prewarm)
         };
+        let _ = self.app.rt_mut().take_urgent_frame();
         #[cfg(target_os = "macos")]
         let presents_at = self.target;
         #[cfg(not(target_os = "macos"))]
@@ -652,17 +666,27 @@ impl OverlayCore {
     /// A layer or XWayland surface kept while hidden (prewarmed, not shown yet) still drains its
     /// connection so nothing queues for the first show.
     fn drain_hidden(&mut self, app: &mut dyn OverlayApp) {
+        self.poll_pending_layer(app);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             let closed = match self.surface.live_mut().map(|l| &mut l.backing) {
-                Some(Backing::Layer(layer)) => layer.drain().then(|| layer.close_reason().map(str::to_owned)),
+                Some(Backing::Layer(layer)) => layer.drain().map(|kind| (kind, layer.close_reason().map(str::to_owned))),
                 Some(Backing::Xwayland(surface)) => {
                     surface.drain();
                     None
                 }
                 _ => None,
             };
-            if let Some(reason) = closed { self.layer_closed(app, reason.as_deref()); }
+            if let Some((kind, reason)) = closed {
+                match kind {
+                    crate::platform::layer_shell_machine::readiness::CloseKind::Closed => {
+                        self.layer_closed(app, reason.as_deref());
+                    }
+                    crate::platform::layer_shell_machine::readiness::CloseKind::OutputGone => {
+                        self.layer_output_gone(app);
+                    }
+                }
+            }
         }
         crate::haptics::flush_live(app.rt_mut(), false);
     }
@@ -721,26 +745,44 @@ impl OverlayCore {
             Input::Key(key) => {
                 if matches!(key.key, crate::Key::Media(_)) && !app.rt().media_keys() { return; }
                 app.rt_mut().key(key);
+                self.dirty = true;
+                self.dispatch_immediate_keyboard(app);
+                return;
             }
             Input::KeyRepeat(key) => {
                 if matches!(key.key, crate::Key::Media(_)) && !app.rt().media_keys() { return; }
                 app.rt_mut().repeat_key(key);
+                self.dirty = true;
+                self.dispatch_immediate_keyboard(app);
+                return;
             }
             Input::KeyUp(key) => {
-                self.dirty |= app.key_up(key);
+                if app.key_up(key) {
+                    self.dirty = true;
+                    self.dispatch_immediate_keyboard(app);
+                }
                 return;
             }
             Input::Physical(event, fallback) => {
                 let keep = matches!(event, crate::PhysicalInput::Key { pressed: true, .. }) || app.rt().wants_key_up();
                 let media_keys = app.rt().media_keys();
-                self.dirty |= app.physical_with_fallback(
+                if app.physical_with_fallback(
                     event,
                     fallback.filter(|ev| keep && (media_keys || !matches!(ev.key, crate::Key::Media(_)))),
-                );
+                ) {
+                    self.dirty = true;
+                    self.dispatch_immediate_keyboard(app);
+                }
                 return;
             }
             Input::Ime(ime) if self.options.keys.takes_keys() => {
+                let is_commit = matches!(ime, crate::Ime::Commit(_));
                 deliver_layer_ime(app.rt_mut(), &mut self.ime, ime);
+                self.dirty = true;
+                if is_commit {
+                    self.dispatch_immediate_keyboard(app);
+                }
+                return;
             }
             Input::Ime(_) => return,
         }
@@ -757,7 +799,7 @@ impl OverlayCore {
 
     /// Syncs OS IME allowance and cursor area for overlays that accept on-demand keyboard focus.
     /// Returns true when the sync queued an immediate IME state event for the runtime.
-    fn sync_ime(&mut self, app: &mut dyn OverlayApp) -> bool {
+    pub(super) fn sync_ime(&mut self, app: &mut dyn OverlayApp) -> bool {
         if !self.options.keys.takes_keys() { return false; }
         let Some(live) = self.surface.live_mut() else { return false };
         match &mut live.backing {

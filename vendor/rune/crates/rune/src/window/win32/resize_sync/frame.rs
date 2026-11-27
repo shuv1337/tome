@@ -13,6 +13,7 @@ use super::present::Win32DragSeam;
 use crate::frame::clock::FrameClock;
 use crate::frame::encoded::FrameReports;
 use crate::frame::host_step::{draw_ui, prepare_gpu_resources_with};
+use crate::frame::stage::{FrameStage, HostObservability, StageGuard};
 use crate::frame::surface_stats::{Pacing, SurfaceMeter};
 use crate::render::{Gpu, Renderer};
 use crate::time::Instant;
@@ -24,7 +25,7 @@ use crate::window::host::stepping::FrameMove;
 use crate::window::host::{CompositorFrame, Host, WindowApp};
 use crate::window::state::{Rest, RestEvent, rest};
 use crate::window::surface::BackoffEvent;
-use crate::window::win32::damage::Damage;
+use crate::window::surface::damage::Damage;
 
 /// Window-neutral presented-frame consumers driven by [`run_drag_frame`].
 ///
@@ -35,6 +36,7 @@ pub(super) struct DragFrameConsumers<'a> {
     pub clock: &'a mut FrameClock,
     pub meter: &'a mut SurfaceMeter,
     pub frame_reports: &'a mut FrameReports,
+    pub observability: Option<&'a HostObservability>,
     pub rest: &'a mut Rest,
     pub damage: &'a mut Damage,
     pub trace: &'a mut Option<Trace>,
@@ -70,6 +72,8 @@ pub(super) fn run_drag_frame<S: DragSeam>(
     if gpu.is_lost() {
         return Err("GPU device lost during drag".into());
     }
+    let _stage_scope = consumers.observability.map(|o| o.scope_stages(consumers.frame_reports.next_seq()));
+    let mut redraw_stage = StageGuard::enter(FrameStage::Redraw);
     let mut profile = FrameProfile::default();
     profile.mark_entry();
     profile.set_loop_why("drag resize sync");
@@ -89,15 +93,19 @@ pub(super) fn run_drag_frame<S: DragSeam>(
     let exact = consumers.app.has_compositor();
     profile.mark_start();
     let (slot_idx, slot_release) = {
+        let _acq = StageGuard::enter(FrameStage::Acquire);
         let (_drag, slot_idx, slot) =
             sync.ensure_gpu_target(&gpu.device, size, target_format, exact)?;
         (slot_idx, slot.last_release)
     };
     profile.mark_acquired();
 
-    let compositing = consumers.app.compositor_animating();
-    consumers.app.rt_mut().host.window_resting = false;
-    let (mut animating, dt) = consumers.app.clock_advance(consumers.clock, now, compositing);
+    let (mut animating, dt) = {
+        let _rt = StageGuard::enter(FrameStage::Runtime);
+        let compositing = consumers.app.compositor_animating();
+        consumers.app.rt_mut().host.window_resting = false;
+        consumers.app.clock_advance(consumers.clock, now, compositing)
+    };
     profile.take_loop_check(consumers.app.rt_mut());
     let update_ms = now.elapsed().as_secs_f64() * 1000.0;
     profile.mark_built();
@@ -123,6 +131,7 @@ pub(super) fn run_drag_frame<S: DragSeam>(
     };
 
     {
+        let _up = StageGuard::enter(FrameStage::Upload);
         let rt = consumers.app.rt_mut();
         prepare_gpu_resources_with(renderer, gpu, rt, size, true, |renderer, _rt| {
             renderer.set_punched_surfaces(Vec::new());
@@ -133,9 +142,13 @@ pub(super) fn run_drag_frame<S: DragSeam>(
 
     let (drag, target) = sync.borrow_slot(slot_idx)?;
     drag.wait_before_d3d12(&gpu.queue, slot_release)?;
+    let mut encode_stage = StageGuard::enter(FrameStage::Encode);
     let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("rune drag resize frame"),
     });
+    // Disarm any stray retained partial-damage state before encoding so drag frames always render
+    // whole into the capacited shared target (never via `draw_armed` against a mismatched buffer).
+    let _ = renderer.damage_drawn().ok();
     let comp_animating = if consumers.app.has_compositor() {
         consumers.app.render_compositor(CompositorFrame {
             device: &gpu.device,
@@ -159,19 +172,30 @@ pub(super) fn run_drag_frame<S: DragSeam>(
     // and `pixel_check` stays in sync; drag frames always draw whole so `Err("not armed")` is expected.
     let _ = renderer.damage_drawn().ok();
     target.transition_for_d3d11(&mut encoder);
+    encode_stage.end();
     profile.mark_encoded();
 
-    renderer.submit(&gpu.queue, encoder);
-    let ready_value = drag.signal_after_d3d12(&gpu.queue)?;
+    let ready_value = {
+        let _submit = StageGuard::enter(FrameStage::Submit);
+        renderer.submit(&gpu.queue, encoder);
+        drag.signal_after_d3d12(&gpu.queue)?
+    };
     profile.mark_submitted();
     let encoded = consumers.frame_reports.stamp();
-    pre_present();
-
-    let release_value = seam.present_shared(drag, target, size, ready_value)?;
+    if detach_dcomp {
+        // Suppress `WM_ERASEBKGND` before the first `BeginPaint` runs on standard-frame windows;
+        // any failure below drives `Event::DragFailed`, which clears the flag again.
+        seam.set_valid_rects_active(true);
+    }
+    let release_value = {
+        let _present = StageGuard::enter(FrameStage::Present);
+        pre_present();
+        seam.present_shared(drag, target, size, ready_value, detach_dcomp)?
+    };
+    let present_returned = consumers.frame_reports.stamp();
     sync.note_slot_release(slot_idx, release_value);
     if detach_dcomp {
         seam.detach_dcomp()?;
-        seam.set_valid_rects_active(true);
     }
     // Reclaim finished wgpu command allocators and staging buffers continuously during drags
     // without blocking the UI thread; any device loss surfaces via `gpu.is_lost()`.
@@ -188,7 +212,8 @@ pub(super) fn run_drag_frame<S: DragSeam>(
     consumers.app.rt_mut().interaction_presented(submitted, None);
     crate::haptics::flush_live(consumers.app.rt_mut(), true);
     consumers.meter.presented();
-    let _ = consumers.frame_reports.drawn(encoded, None, now, update_ms);
+    redraw_stage.end();
+    let _ = consumers.frame_reports.drawn_with_present(encoded, present_returned, None, now, update_ms, false);
     consumers.app.inspect_frame();
 
     let mut trace_finished = false;
@@ -254,7 +279,7 @@ impl Host {
         let mut swap_chain = l.native.resize_sync.swap_chain.take();
         let mut dcomp_detached = l.native.resize_sync.dcomp_detached;
         let mut sync = std::mem::take(&mut l.native.resize_sync);
-        let mut damage = std::mem::take(&mut l.native.damage);
+        let mut damage = std::mem::take(&mut l.damage);
         let mut seam = Win32DragSeam {
             hwnd,
             handover: l.native.mode.handover(),
@@ -268,6 +293,7 @@ impl Host {
                 clock: &mut self.clock,
                 meter: &mut self.meter,
                 frame_reports: &mut self.frame_reports,
+                observability: Some(&self.observability),
                 rest: &mut self.rest,
                 damage: &mut damage,
                 trace: &mut self.trace,
@@ -295,7 +321,7 @@ impl Host {
         sync.swap_chain = swap_chain;
         sync.dcomp_detached = dcomp_detached;
         l.native.resize_sync = sync;
-        l.native.damage = damage;
+        l.damage = damage;
         l.presented = None;
         sync_platform_core(
             l,

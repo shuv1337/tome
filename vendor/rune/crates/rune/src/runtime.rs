@@ -65,6 +65,7 @@ pub(crate) mod anchor;
 mod api;
 mod commit;
 mod cx;
+pub(crate) use cx::PrimaryPointer;
 mod drag_out_host;
 mod elements;
 pub(crate) mod event_log;
@@ -232,6 +233,8 @@ mod aspect_fit_tests;
 mod aspect_ratio_tests;
 #[cfg(test)]
 mod anchor_fit_tests;
+#[cfg(test)]
+mod drop_feedback_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]

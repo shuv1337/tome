@@ -91,6 +91,8 @@ impl RuntimeCore {
             system_accent: self.host.system_accent,
             system_contrast: self.host.system_contrast,
             system_increased_contrast: self.host.system_increased_contrast,
+            system_text_scale: self.host.system_text_scale,
+            system_reduced_transparency: self.host.system_reduced_transparency,
             system_scroll_bars: self.host.scroll_bars.state,
             system_languages: self.host.system_languages.clone(),
             languages_gen: self.host.languages_gen,
@@ -103,6 +105,8 @@ impl RuntimeCore {
             caret_read: false,
             wm_state: self.host.wm_state,
             wm_state_read: false,
+            primary_pointer: self.host.primary_pointer,
+            primary_pointer_read: false,
             layout_seen: self.commit.layout_seen.rects.clone(),
             layout_reads: Vec::new(),
             commits: self.commit.commits,
@@ -282,6 +286,7 @@ impl Measurement<'_> {
             titlebar: self.titlebar,
             caret_read: self.caret_read,
             wm_state_read: Some(self.wm_state_read),
+            primary_pointer_read: Some(self.primary_pointer_read),
             layout_reads: self.layout_reads,
             memo_flattened: Some(memo_pending),
             memo_reused,
@@ -552,6 +557,8 @@ impl Measurement<'_> {
             system_accent: this.system_accent,
             system_contrast: this.system_contrast,
             system_increased_contrast: this.system_increased_contrast,
+            system_text_scale: this.system_text_scale,
+            system_reduced_transparency: this.system_reduced_transparency,
             system_scroll_bars: this.system_scroll_bars,
             system_languages: this.system_languages.clone(),
             system_reduced_motion: this.system_reduced_motion,
@@ -564,6 +571,8 @@ impl Measurement<'_> {
             caret_read: std::cell::Cell::new(false),
             wm_state: this.wm_state,
             wm_state_read: std::cell::Cell::new(false),
+            primary_pointer: this.primary_pointer,
+            primary_pointer_read: std::cell::Cell::new(false),
             safe_area: this.safe_area,
             layout: this.layout_seen.clone(),
             layout_reads: Default::default(),
@@ -573,7 +582,7 @@ impl Measurement<'_> {
             let cx = fresh_cx(self);
             #[cfg(feature = "hot")]
             let emptied = self.memo.emptied();
-            let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_accent, self.system_reduced_motion, self.languages_gen, crate::theme::blends_srgb(), self.memo_chrome_bits(), cx.caret.clone(), cx.layout.clone());
+            let memo = crate::memo::enter(std::mem::take(self.memo), self.env, self.system_accent, self.system_reduced_motion, self.system_reduced_transparency, self.languages_gen, crate::theme::blends_srgb(), self.memo_chrome_bits(), cx.caret.clone(), cx.layout.clone());
             let view_time = crate::frame::profile::Scope::new(crate::frame::profile::Phase::View);
             // The view and the rows it builds measure text with the window's own text system.
             #[cfg(not(feature = "hot"))]
@@ -599,7 +608,7 @@ impl Measurement<'_> {
                         self.virtual_culled.clear();
                         self.virtual_inputs.clear();
                         let cx = fresh_cx(self);
-                        let memo = crate::memo::enter(emptied, self.env, self.system_accent, self.system_reduced_motion, self.languages_gen, crate::theme::blends_srgb(), self.memo_chrome_bits(), cx.caret.clone(), cx.layout.clone());
+                        let memo = crate::memo::enter(emptied, self.env, self.system_accent, self.system_reduced_motion, self.system_reduced_transparency, self.languages_gen, crate::theme::blends_srgb(), self.memo_chrome_bits(), cx.caret.clone(), cx.layout.clone());
                         let (root, cx) = crate::hot::original_only(|| self.root_view(cx));
                         (crate::hot::original_only(|| self.build_tree(root, tx, force_all, keep_windows)), cx, memo)
                     }
@@ -617,6 +626,7 @@ impl Measurement<'_> {
             // Reads made by memos this build reused count as made again.
             self.caret_read = cx.caret_read.get() || replayed.caret;
             self.wm_state_read = cx.wm_state_read.get();
+            self.primary_pointer_read = cx.primary_pointer_read.get();
             self.layout_reads = cx.layout_reads.take();
             for read in replayed.layout { layout_read::note_read_at(&mut self.layout_reads, &read.key, read.same, read.at); }
 

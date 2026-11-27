@@ -168,6 +168,9 @@ impl RuntimeCore {
     }
 
     pub(super) fn secondary_down_for(&mut self, x: f32, y: f32, platform: SecondaryPlatform) {
+        if !self.pointer.is_touch_input() {
+            self.sync_primary_pointer(cx::PrimaryPointer::Hover);
+        }
         let (x, y) = self.locked_point(x, y);
         let starts_gesture = !self.pointer.any_button_down() && !self.pointer.captured();
         self.pointer.note_button_down(crate::PointerButton::Secondary);
@@ -359,7 +362,7 @@ impl RuntimeCore {
         {
             let i = self.tree.nodes.iter().position(|n| n.path == path);
             let point = i.map_or(
-                PointerEvent { x, y, window_x: x, window_y: y, pressing: self.pointer.any_button_down() },
+                PointerEvent { x, y, w: 0.0, h: 0.0, window_x: x, window_y: y, pressing: self.pointer.any_button_down() },
                 |i| self.pointer_event(i, x, y),
             );
             let link = i.and_then(|i| self.secondary_link_kind_at(i, x, y));

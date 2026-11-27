@@ -39,12 +39,12 @@ Rune's core crate: views, layout, animation, rendering, text and the native shel
     - `.shrink()` and the single-line truncation builders (`.truncate()`, `.truncate_middle()`, `.truncate_head()`, `.truncate_fade()`, `.truncate_fade_width(..)`) set `flex-shrink: 1` and lower an automatic `min-width` to `0` while preserving any explicit `.min_w(..)` in either call order, **not** `min-height: 0` (nested vertical flex columns still need explicit `.min_h(0.0)`; pass `.min_w(0.0)` after to override an earlier explicit minimum).
     - `.scroll(..)`, `.scroll_x()`, and `.scroll_xy()` set Taffy `overflow` (`hidden`/`scroll`, `scroll`/`hidden`, `scroll`/`scroll`). At commit time (`runtime/commit/flatten.rs`, `runtime/commit.rs::unwrapped_width`), a `scroll_x` viewport—and a single-child `scroll_xy` viewport—forces `flex-direction: row`. Each direct child of `scroll_x`/`scroll_xy` gets `flex-shrink: 0`; if its width is `auto` or `100%` (`.w_full()`), width is rewritten to `max-content` with `min-width: 100%` when `min-width` is `auto` (on both `auto` and `w_full` for single-child viewports, and on `w_full` for multi-child viewports). Under `scroll_xy`, children with no explicit `align_self` also receive `align-self: flex-start`.
     - `.border_layout()` copies the border widths into Taffy's `border` rect at commit time (`runtime/commit/device.rs::border`), snapped to whole device pixels so layout matches rendered hairlines across scales.
-    - `.equal_columns(n)` switches the container to CSS Grid (`display: grid; grid-template-columns: repeat(n, 1fr)`) and `.grid_cell(col)` places a child in 1-based column `col + 1` of row 1 (`span 1`).
+    - `.equal_columns(n)` switches the container to CSS Grid (`display: grid; grid-template-columns: repeat(n, 1fr)`), `.auto_fit_columns(min)` / `.auto_fill_columns(min)` switch it to `repeat(auto-fit, minmax(min, 1fr))` / `repeat(auto-fill, minmax(min, 1fr))` (with `set_*` in-place twins, falling back to `1fr` for non-positive or non-finite `min`), and `.grid_cell(col)` places a child in 1-based column `col + 1` of row 1 (`span 1`).
     - `.absolute(left, top)`, `.pin(l, t, r, b)`, and `.anchored*`/`.above` set `position: absolute` against the parent's padding box; anchored overlays are then positioned by the runtime relative to their target anchor and flipped/clamped to the window, or to a named boundary element via `.anchored_in(key)` (with pure helpers `anchor_rect` and `anchor_rect_in`). `.anchored_fit` clamps overflowing surfaces on both the main axis and the cross axis (8 pt inside the window or boundary) so scrolling menus and submenus stay inside small windows.
     - `.sticky_top`, `.sticky_top_showing`, `.sticky_bottom`, and `.sticky_left` run outside Taffy in the paint and hit-test pass (`runtime/scroll/sticky.rs`); laid-out rects stay at their unscrolled positions.
     - `.aspect_ratio(r)` passes CSS `aspect-ratio` directly to Taffy; `.aspect_fit(r)` runs a two-pass commit rewrite (`fit_room` → `fitted` in `commit/flatten.rs`) to measure the available room first and then lay out the largest box at ratio `r` inside it.
-  - **Static `--html` export differences** (`crates/rune/src/runtime/web/export/page.rs`, `css.rs`, `export.rs`): `BASE_CSS` sets `min-width: 0` globally (instead of `auto`) and leaves `flex-shrink` at CSS's default `1` (so `css::layout` emits `flex-shrink: 0` per element and omits `min-width: auto`). The export omits `calc()` and `fr` values (including `equal_columns` grid template tracks and `grid_cell` placement, even when `display: grid` is emitted), text inputs and secure/redacted nodes, and disallowed, exiting, or invisible (`opacity <= 0.01`) subtrees.
-  - **Taffy features with no `El` builder**: `calc()` lengths, arbitrary CSS Grid tracks/rows/areas/auto-flow/placement beyond `equal_columns` and first-row `grid_cell`, `display: block` / `display: none` / `display: flow-root` (omit elements from the view tree instead of `display: none`), arbitrary `flex-basis` (only `auto` or `0` via `.grow(..)`), `order`, `box-sizing: content-box`, and reverse flex directions or wrap (`row-reverse`, `column-reverse`, `wrap-reverse`).
+  - **Static `--html` export differences** (`crates/rune/src/runtime/web/export/page.rs`, `css.rs`, `export.rs`): `BASE_CSS` sets `min-width: 0` globally (instead of `auto`) and leaves `flex-shrink` at CSS's default `1` (so `css::layout` emits `flex-shrink: 0` per element and omits `min-width: auto`). The export omits `calc()` values and `grid_cell` placement (though `display: grid` and `grid-template-columns` are emitted), text inputs and secure/redacted nodes, and disallowed, exiting, or invisible (`opacity <= 0.01`) subtrees.
+  - **Taffy features with no `El` builder**: `calc()` lengths, arbitrary CSS Grid tracks/rows/areas/auto-flow/placement beyond `equal_columns`, `auto_fit_columns`, `auto_fill_columns`, and first-row `grid_cell`, `display: block` / `display: none` / `display: flow-root` (omit elements from the view tree instead of `display: none`), arbitrary `flex-basis` (only `auto` or `0` via `.grow(..)`), `order`, `box-sizing: content-box`, and reverse flex directions or wrap (`row-reverse`, `column-reverse`, `wrap-reverse`).
 - **Animation** (`rune-motion`, `runtime.rs`): analytic springs (`Spring::new(duration, bounce)`),
   tweens, decay and transitions driven through `rune_motion::Scene` and `AnimationStore`. Retargets
   keep exact position and velocity.
@@ -768,7 +768,7 @@ top-left, which is what popups and context menus anchor to.
 | `on_wheel`, `on_wheel_any` | `WheelEvent::x`, `y` (`dx`, `dy` are the scroll in points) | local |
 | `on_magnify`, `on_magnify_any`, `on_rotate` | `MagnifyEvent::x`, `y`, `RotateEvent::x`, `y` | local |
 | `on_smart_magnify` | `x`, `y` | local |
-| `on_pointer_move_local`, `on_secondary_press_local`, `on_any_press` | `PointerEvent::x`, `y` | local |
+| `on_pointer_move_local`, `on_secondary_press_local`, `on_any_press` | `PointerEvent::x`, `y`, `w`, `h` | local |
 | | `PointerEvent::window_x`, `window_y`, `window()` | window |
 | | `PointerEvent::pressing` (whether any mouse button is held down) | window-wide |
 | `on_pointer_move`, `on_secondary_press` | `PointerPress::x`, `y` | window |
@@ -1551,9 +1551,13 @@ For an app's own perf log, with nothing changed about how its windows draw:
   `p.presented_at() == None`). `p.seq()` matches `FrameEncoded::seq()` for that `Drawn` frame (and
   `on_frame_encoded` always runs before `on_frame_presented` for the same `seq`), so apps can measure real
   input-to-photon latency and detect missed vsyncs against `FrameEncoded::presents_at()`. Called on platforms with
-  reliable actual presentation timestamps (macOS Metal via `MTLDrawable::addPresentedHandler`); Windows, Linux,
-  headless runs, overlays and the web never call it. Without it, no layer hook is attached; once in-flight drawables
-  land, the wake watch clears automatically so an idle window never wakes or draws.
+  reliable actual presentation timestamps: macOS Metal (`MTLDrawable::addPresentedHandler`), Windows DX12/DXGI
+  flip-model swap chains (`IDXGISwapChain::GetFrameStatistics` / `GetFrameStatisticsMedia`, reporting `None` if an
+  older frame was skipped or overwritten before polling), and Linux Wayland compositors advertising `wp_presentation`
+  (`wp_presentation_feedback.presented` / `discarded`). Linux X11, Wayland without `wp_presentation`, Windows
+  CPU-first / bitblt / unsupported DXGI, web (browsers do not expose canvas scanout timestamps), overlays, and
+  headless runs never call it instead of faking submit or target times. Without it, no platform hook is attached;
+  once in-flight frames land (or settle), watches and poll timers clear automatically so an idle window never wakes.
 - **`App::on_frame_drawn(|rt: &Runtime<S>| ..)`** runs on the UI thread after each `Drawn` frame (on desktop
   windows and in the web runner, and not on unchanged or skipped frames) with the runtime as it presented that frame,
   so an app can watch its own motion, query the focused presented element without building the tree
@@ -1618,7 +1622,8 @@ while every window is hidden, including in an accessory app), sizes the icon in 
 AppKit tints the glyph for light and dark menu bars; primary click sends
 `TrayEvent::Activate`, and secondary click or Control-click opens the menu. `set_menu`,
 `set_tooltip`, `set_icon`, `set_icon_name` (Linux SNI `IconName`), `set_title` (macOS
-monospaced-digit menu-bar title beside the icon; Linux SNI `Title`), `rect` (physical
+monospaced-digit menu-bar title beside the icon; Linux SNI `Title`), `set_highlighted`
+(holds the macOS status item's pressed highlight; no-op elsewhere), `rect` (physical
 desktop `[x, y, width, height]` on macOS and Windows; `None` on Linux SNI), and dropping
 `Tray` may run from any thread. `TrayItem::Check` (`TrayItem::check` / `TrayItem::checked`)
 adds toggleable checkmarked menu items across macOS, Windows, and Linux.
@@ -1803,8 +1808,10 @@ rune::App::new(spec).fit_content_height().run();
 
 ### Finite choreography
 
-`El::sequence` uses the same render-clock tracks as loops, then holds the final pose
-and sleeps. No app phases, poll callback, or `wake_after` calls are needed.
+`El::sequence` uses the same render-clock tracks as loops, holding the final pose
+by default (or returning to the element's own pose with `Sequence::release()`, like CSS
+`animation-fill-mode: none`) and sleeping once finished. No app phases, poll callback, or
+`wake_after` calls are needed.
 
 ```rust,ignore
 use rune::{Beat, Sequence, el};
@@ -2023,6 +2030,16 @@ thread, falling back once off the UI thread to KDE's duration factor or GNOME's
 `Env { system_dark, scale }` literals remain valid. Headless runtimes default to
 false; tests can call `rt.set_system_reduced_motion(value)` and inspect
 `rt.system_reduced_motion()`.
+
+`cx.system_reduced_transparency()` reports whether the OS or browser asks apps to reduce
+transparency: macOS reads `NSWorkspace.accessibilityDisplayShouldReduceTransparency` (updating
+live on `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`), Windows reads
+Transparency effects (`EnableTransparency` / `UISettings::AdvancedEffectsEnabled`, updating live
+on `WM_SETTINGCHANGE` and material policy notifications), and the web watches
+`(prefers-reduced-transparency: reduce)`. Headless captures accept `RUNE_REDUCE_TRANSPARENCY=1`;
+tests can call `rt.set_system_reduced_transparency(value)` and inspect
+`rt.system_reduced_transparency()`. While true, `El::backdrop_blur` skips the blur and draws only
+its fill.
 
 `cx.system_languages()` returns the user's preferred BCP 47 language tags in
 preference order and `cx.locale()` returns the primary tag (`Option<&str>`). Both
@@ -2330,7 +2347,7 @@ newline on `Shift+Return` and pastes plain text. The mark and block methods work
   `edit.replace_with_pill(range, id, label)` to swap a typed `@query` for one (one undo step;
   wrap multi-part edits like `replace_with_pill` + `insert(" ")` in `edit.undo_group(|e| ..)`).
   `edit.pills()` lists `(range, id)` for each. The field draws each pill as a rounded chip
-  (`.pill_style(|id| PillStyle::new().bg(..).fg(..).icon(..).ring(color, width).radius(points))`,
+  (`.pill_style(|id| PillStyle::new().bg(..).fg(..).icon(..).ring(color, width).radius(points).pad_x(points).margin_x(points))`,
   `.pill_image(|id| ...)` for a full-colour `Pixels` logo in the leading slot, or `.pill_colors(bg, fg)`
   and `.pill_icon(|id| ...)`), and a chip never splits across lines (static text supports the same
   `PillStyle` via `.pill(range, style)`, `.pills(..)` and `.pill_with_image(range, style, pixels)`).
@@ -3477,10 +3494,13 @@ is one more host on the event loop
   `Exclusive` layer holds the keys leaves the desktop without a keyboard until it exits or is
   killed.
 - Activation tokens: `OverlayHandle::activation_token(reply)` asks a shown Wayland layer-shell
-  overlay's compositor for an `xdg_activation_v1` token using the latest pointer-button, key, or
-  touch-down serial on the surface, answering ahead of the same turn's `hide()` so a program
-  launched with `XDG_ACTIVATION_TOKEN` can come to the front under focus-stealing prevention.
-  Other platforms, hidden or closed overlays, and dropped handles answer `None`.
+  overlay's compositor for an `xdg_activation_v1` token using the latest pointer-button, key,
+  keyboard-enter, or touch-down serial on the surface. It commits the request ahead of the same
+  turn's `hide()` or `release_keys()` without blocking the event thread in a compositor roundtrip
+  and invokes `reply` when `xdg_activation_token_v1.done` arrives on the token's private queue
+  (even after the overlay hid or released exclusive keyboard focus), so a program launched with
+  `XDG_ACTIVATION_TOKEN` can come to the front under focus-stealing prevention. Other platforms,
+  hidden or closed overlays, timed-out requests, and dropped handles answer `None`.
 - Checked under headless sway (layer shell, and Xwayland for X11) and on macOS (panel level,
   bounds, hide and reshow). Windows builds are checked with `cargo xwin clippy` only.
 - `El::window_drag()` (and `El::no_window_drag()`) moves window-backed overlays (Windows, macOS
@@ -3524,7 +3544,7 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   `Compositor::release_gpu`, and call `Frame::restore_device_callbacks()` right after initializing
   a renderer that overwrites wgpu's single-slot `set_device_lost_callback` or
   `on_uncaptured_error` handlers so Rune keeps owning device-loss recovery and bounded error
-  logging. On macOS, engines that need depth/stencil, MSAA, render bundles, indirect draws, or
+  logging. On macOS, engines that need render bundles, indirect draws, occlusion queries, or
   other wgpu features beyond Rune's native Metal subset should opt into
   `App::gpu_backend(GpuBackend::Wgpu)` and `prewarm_gpu_on(GpuBackend::Wgpu)`.
 - **Terminal GPU loss policy (`GpuLossPolicy::Terminal`).** Apps embedding a renderer with
@@ -3592,7 +3612,13 @@ and its goldens are unchanged. `examples/lab` uses it to composite `rune-light` 
   One compositor serves any number of formats: build pipelines per `EffectSite::format`.
 - **Per-slot identity and payload.** `EffectSite::mark` is the slot's `El::effect` tag and
   `EffectSite::data` its `El::effect_data([f32; 4])` payload, both carried in the slot's record, so
-  a compositor needs neither `Runtime::marks` nor its own copy of app state. A removed element keeps
+  a compositor needs neither `Runtime::marks` nor its own copy of app state. Before opening its own
+  passes or calling `Renderer::prepare`, a compositor can inspect the current frame's laid-out slots
+  via `Frame::effect_slots` / `Frame::effect_slot(mark)` (or `Runtime::effect_slots` /
+  `Runtime::effect_slot(mark)` to borrow only `f.rt` while encoding into `f.encoder`), or read a
+  raw record's tag directly with `Instance::effect_mark()`, returning `compose::EffectSlot` with
+  each slot's `index`, `instance`, `mark`, `data`, device-pixel `rect`, `scale`, `bleed` and
+  `backdrop`. A removed element keeps
   its last-built payload through its exit transition, so an outgoing slot keeps drawing its own
   content while its replacement enters beside it. Keep resources per mark and drop a mark's once a
   frame passes without it (the example on `compose::Compositor`). The slot's rect and `scale`
@@ -3954,9 +3980,9 @@ follows the element's presented rect, its opacity fades the blur, and its outer 
 blurred interior clear. A still frame doesn't redraw.
 
 Every blurred element in a frame blurs, growing the blur uniform buffer past
-`MAX_BACKDROP_BLURS` (4) when needed, as in CSS `backdrop-filter`. Blurs drawn into a target
-without `COPY_SRC`, or into a caller's own `wgpu::RenderPass` through `Renderer::draw_range`,
-draw only their fill. The web backend asks the canvas for `COPY_SRC`. An element fading on its
+`MAX_BACKDROP_BLURS` (4) when needed, as in CSS `backdrop-filter`. While `cx.system_reduced_transparency()` is true, blurs are skipped and the element draws only
+its fill. Blurs drawn into a target without `COPY_SRC`, or into a caller's own `wgpu::RenderPass`
+through `Renderer::draw_range`, also draw only their fill. The web backend asks the canvas for `COPY_SRC`. An element fading on its
 own still blurs what is behind it, while inside an ancestor drawn as one layer (opacity below 1,
 including a fading wrapper, `El::group_opacity`, `El::blur`, `El::cache`, or a rotation) the
 backdrop is what that layer has drawn so far, matching CSS's Backdrop Root. A frame without a
@@ -3983,13 +4009,14 @@ feature (`crates/rune/src/a11y/`).
   offsets, modal dialogs (the background leaves the tree), and secure text (never exposed).
   Plain layout boxes with no key, label or role join their parent, so the tree reads like the
   interface, not the layout.
-- **Builders for the rest**: `description`, `a11y_value`, `range_value` and `range_step`,
+- **Builders for the rest**: `description` / `description_static`, `role_description` / `role_description_static` (ARIA `aria-roledescription`, ignored on elements with no role), `a11y_value`, `range_value` and `range_step`,
   `checked` and `checked_mixed`, `disabled`, `aria_disabled` (unavailable to assistive tech
   without stripping keyboard focusability, still advertising `Action::Focus` while suppressing
   activation actions), `read_only`, `invalid`, `required`, `multiselectable`,
   `has_popup(HasPopup::Menu | Listbox | Tree | Grid | Dialog)`,
   `orientation(Orientation::Horizontal | Vertical)`,
-  `auto_complete(AutoComplete::Inline | List | Both)`, `controls(key)`, `owns(key)`, `sorted`,
+  `auto_complete(AutoComplete::Inline | List | Both)`,
+  `current(Current::Page | Step | Location | Date | Time | True)`, `controls(key)`, `owns(key)`, `sorted`,
   `a11y_hidden`, `live_region(LiveRegion::Polite)`, `position_in_set`, `shortcut_hint` and
   `active_descendant` (the highlighted row of a tree, table or suggestion list whose container
   or field keeps focus). An icon-only button needs `.label("Close")`. An `El::help` tooltip
@@ -4169,7 +4196,7 @@ $S --script examples/settings/scripts/keycaps.json --video keys.mov --keys --key
 $S --script examples/settings/scripts/demo.json --start 0.12 --frames 24 --every 3 --cols 4 \
    --strip strip.png --crop 370,74,214,36 --crop 530,305,60,30     # crops stacked per frame
 $S --tree tree.json [--at T] [--settle]  # key, path, role, label, description, text, presented rect, target,
-                                 # opacity, radius, fill/borderColor/text colour, textStyle (resolved
+                                 # opacity, layerOpacity, blur, backdropBlur, radius, shadows, fill/borderColor/text colour, textStyle (resolved
                                  # family, size, weight, lineHeight, tracking, italic), hover/press, moving
 $S --trace run.jsonl             # motion-trace JSONL (the app trace format); keyed elements only
 $S --native --trace run.jsonl --frames 240  # native submission timestamps, then close the traced window
@@ -4412,7 +4439,7 @@ if let Some(menu) = rt.popup_menu() {
   while `Tx::input_time()` stays `None`.
 - Inspect `rt.state`, `rt.presented_focus_key()` (zero-allocation focus key query matching
   `rt.elements()`), `rt.elements()` (`ElementInfo`: `key`, `path`, `role`, `label`,
-  `description`, `text`, `rect`, `inset`, `fill`, `border_color`, `text_color`,
+  `description`, `text`, `rect`, `opacity`, `layer_opacity`, `blur`, `backdrop_blur`, `inset`, `fill`, `border_color`, `text_color`,
   `text_style`, `text_size`, `wrap`, `truncate`, `text_cut`, `clips`, `scroll_axes`,
   `raised`, `focused`, `exiting`, ...), `Tx::read_elements` (deferred presented-frame element
   reads from handlers and `poll`), `Tx::read_layout` / `Tx::read_presented` (one keyed

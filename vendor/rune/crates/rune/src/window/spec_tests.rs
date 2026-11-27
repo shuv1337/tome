@@ -160,6 +160,8 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
     let window = WindowSpec::new("secondary", spec)
         .srgb_blend(false)
         .font_smoothing(crate::FontSmoothing::Off)
+        .wheel_glide(false)
+        .wheel_line(60.0)
         .max_native_materials(8)
         .fit_content_height()
         .float_on_open()
@@ -191,11 +193,16 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
         .on_frame_encoded(|_| {})
         .on_frame_presented(|_| {})
         .on_frame_drawn(|_| {})
+        .on_frame_stage(|_| {})
+        .on_window_key(|_| {})
+        .on_window_focus(|_| {})
         .compositor(DummyCompositor)
         .dev_stats(stats)
         .map_app(|app| app.keep_running());
     assert!(!window.app.runtime.srgb_blend);
     assert_eq!(window.app.runtime.font_smoothing, crate::FontSmoothing::Off);
+    assert!(!window.app.runtime.wheel_glide);
+    assert_eq!(window.app.runtime.wheel_line, Some(60.0));
     assert_eq!(window.app.runtime.max_native_materials, 8);
     assert!(window.app.runtime.modifier_keys && window.app.runtime.media_keys && window.app.runtime.tab_visits_controls);
     assert!(window.app.runtime.on_focus.is_some() && window.app.runtime.on_mods.is_some());
@@ -208,6 +215,7 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
     assert!(window.app.turn_scope.is_some() && window.app.on_reopen.is_some() && window.app.on_open_url.is_some() && window.app.on_open_files.is_some());
     assert!(window.app.on_window.is_some() && window.app.on_ready.is_some() && window.app.on_display_close.is_some());
     assert!(window.app.on_frame_encoded.is_some() && window.app.on_frame_presented.is_some() && window.app.on_frame_drawn.is_some());
+    assert!(window.app.observability.on_frame_stage.is_some() && window.app.observability.on_window_key.is_some() && window.app.observability.on_window_focus.is_some());
     assert!(window.app.compositor.is_some());
 
     let clamped = WindowSpec::new("clamped", AppSpec::new("clamped", (100.0, 100.0), || (), |_, _| crate::el()))
@@ -585,6 +593,27 @@ fn app_and_window_spec_cpu_first_default_auto_and_retain_builder_value() {
         position: None,
         physical_size: None,
     };
+}
+
+#[test]
+fn app_and_window_spec_keyboard_dispatch_default_batched_and_retain_per_window_value() {
+    let spec = || AppSpec::new("transport", (800.0, 520.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).keyboard_dispatch, crate::KeyboardDispatch::Batched);
+    assert_eq!(WindowSpec::new("main", spec()).app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
+
+    let app_imm = App::new(spec()).keyboard_dispatch(crate::KeyboardDispatch::Immediate);
+    assert_eq!(app_imm.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    let from_app = WindowSpec::from_app("main", app_imm);
+    assert_eq!(from_app.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+
+    let win_a = WindowSpec::new("a", spec()).keyboard_dispatch(crate::KeyboardDispatch::Immediate);
+    let win_b = WindowSpec::new("b", spec()).keyboard_dispatch(crate::KeyboardDispatch::Batched);
+    assert_eq!(win_a.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    assert_eq!(win_b.app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
+    let kept = win_a.options(WindowOptions::default());
+    assert_eq!(kept.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    let reset = kept.keyboard_dispatch(crate::KeyboardDispatch::Batched);
+    assert_eq!(reset.app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
 }
 
 #[test]

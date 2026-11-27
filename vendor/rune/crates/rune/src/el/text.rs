@@ -426,6 +426,21 @@ impl El {
             .display_pills()
             .into_iter()
             .map(|(start, end, id)| {
+                if let Some(inline) = inp.pill_inline_image.as_ref().and_then(|f| f(id)) {
+                    return crate::text::PillChip {
+                        start,
+                        end,
+                        icon: None,
+                        image: None,
+                        bg: None,
+                        fg: None,
+                        ring: None,
+                        radius: None,
+                        pad_x: None,
+                        margin_x: None,
+                        bare: Some(Box::new(inline.into_bare())),
+                    };
+                }
                 let st = inp.pill_style.as_ref().map(|f| f(id)).unwrap_or_default();
                 let image = inp.pill_image.as_ref().and_then(|f| f(id));
                 let icon = if image.is_some() {
@@ -433,7 +448,7 @@ impl El {
                 } else {
                     st.icon.or_else(|| inp.pill_icon.as_ref().and_then(|f| f(id)))
                 };
-                crate::text::PillChip { start, end, icon, image, bg: st.bg, fg: st.fg, ring: st.ring, radius: st.radius, bare: None }
+                crate::text::PillChip { start, end, icon, image, bg: st.bg, fg: st.fg, ring: st.ring, radius: st.radius, pad_x: st.pad_x, margin_x: st.margin_x, bare: None }
             })
             .collect();
     }
@@ -478,7 +493,7 @@ impl El {
             }
         }
         let pill_fg = t.cold.pill_colors.and_then(|(_, fg)| fg);
-        base_spans.extend(t.cold.pills.iter().filter_map(|p| {
+        base_spans.extend(t.cold.pills.iter().filter(|p| p.bare.is_none()).filter_map(|p| {
             Some(Span { start: p.start, end: p.end, color: Some(p.fg.or(pill_fg)?), ..Span::default() })
         }));
         let mut flat = crate::text::flatten_spans(&base_spans);
@@ -829,8 +844,8 @@ impl El {
     }
     /// Mark this text field's misspelled words, as a browser's `spellcheck` does: the platform's
     /// checker (Windows' spell checking API, AppKit's `NSSpellChecker` on macOS, installed system
-    /// Hunspell dictionaries on Linux when the default-on `hunspell` feature is enabled, or fetched
-    /// Hunspell dictionaries on the web) puts a red
+    /// Hunspell dictionaries on Linux or fetched Hunspell dictionaries on the web when the
+    /// default-on `hunspell` feature is enabled) puts a red
     /// marker under each word the caret has left, and the field's menu offers its suggestions and
     /// Learn Spelling. Off by default; a secure field never checks.
     pub fn spellcheck(mut self, on: bool) -> Self {

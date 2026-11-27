@@ -21,6 +21,8 @@ pub(crate) mod languages;
 pub(crate) mod layer_shell;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod layer_shell_machine;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) mod linux_color_scheme;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(target_os = "macos")]
@@ -34,6 +36,7 @@ pub(crate) mod preferences;
 pub(crate) mod ready_signal;
 pub(crate) mod reopen;
 pub(crate) mod scroll_bars;
+pub(crate) mod text_scale;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod wayland;
 #[cfg(target_arch = "wasm32")]

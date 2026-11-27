@@ -13,6 +13,7 @@ use crate::frame::clock::FrameClock;
 use crate::frame::host_step::{
     self, Acquire, FrameHost, Gate, PostStepCheck, ReacquireReason, RenderPrep, StepInfo,
 };
+use crate::frame::stage::{FrameStage, StageGuard};
 use crate::runtime::RuntimeCore;
 use crate::time::Instant;
 use crate::window::chrome::sync_platform_core;
@@ -192,7 +193,13 @@ impl Host {
         // Linux: so does one there (`linux::cpu_frame`).
         #[cfg(target_os = "linux")]
         if self.win.as_ref().is_some_and(|w| w.native.mode.cpu_draws()) { return self.draw_cpu(resizing); }
-        let mut frame = WindowFrame { host: self, resizing, state: FrameState::default() };
+        let seq = self.frame_reports.next_seq();
+        let _stage_scope = self.observability.scope_stages(seq);
+        let mut frame = WindowFrame {
+            host: self,
+            resizing,
+            state: FrameState { redraw_stage: StageGuard::enter(FrameStage::Redraw), ..FrameState::default() },
+        };
         host_step::run(&mut frame);
     }
 }
@@ -209,7 +216,6 @@ struct FrameState {
     deferred: bool,
     #[cfg(target_os = "macos")]
     shown: Option<crate::platform::macos::PresumeShown>,
-    #[cfg(target_os = "macos")]
     drawable: Option<u64>,
     #[cfg(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
     materials_checked: bool,
@@ -221,6 +227,9 @@ struct FrameState {
     post_acquire_done: bool,
     now: Option<Instant>,
     encoded: Option<Instant>,
+    redraw_stage: StageGuard,
+    present_returned: Option<Instant>,
+    urgent_admitted: bool,
 }
 
 struct WindowFrame<'a> {
@@ -234,6 +243,7 @@ impl WindowFrame<'_> {
         let (Some(l), Some((gpu, renderer))) = (self.host.win.as_mut(), self.host.gpu.as_mut()) else { return false };
         let Some(surface) = l.surface.as_ref() else { return false };
         let ok = reblend_core(surface, gpu, &mut l.config, renderer, &mut l.alpha, self.host.app.rt_mut());
+        l.damage.reset();
         #[cfg(target_os = "windows")]
         l.native.slot.reconfigured(ok);
         ok
@@ -261,6 +271,7 @@ impl FrameHost for WindowFrame<'_> {
                 let native = &mut w.native;
                 native.video_layers.release(native.mode.handover());
             }
+            self.state.redraw_stage.end();
             self.host.covered_frame();
             return Gate::Skip;
         }
@@ -307,9 +318,13 @@ impl FrameHost for WindowFrame<'_> {
                 l.native.prime.stop();
             } else if !l.native.prime.presumes() {
                 self.host.meter.skipped();
+                self.state.redraw_stage.end();
                 self.host.missed_frame(Missed::Occluded, false);
                 return Gate::Skip;
             }
+        }
+        if self.host.app.rt_mut().take_urgent_frame() && !hidden {
+            l.admit_urgent_frame();
         }
         #[cfg(target_os = "macos")]
         if hidden { self.state.prewarm = l.native.panel.as_ref().map(|p| p.prewarm()); }
@@ -321,14 +336,28 @@ impl FrameHost for WindowFrame<'_> {
         #[cfg(not(target_os = "macos"))]
         let deferred = false;
         #[cfg(target_os = "macos")]
-        let target = if hidden || self.resizing || deferred { None } else if let Some(pacing) = &mut l.native.pacing {
+        let (target, urgent_admitted) = if hidden || deferred {
+            (None, false)
+        } else if self.resizing {
+            if let Some(pacing) = &mut l.native.pacing { pacing.consume_urgent(); }
+            (None, false)
+        } else if let Some(pacing) = &mut l.native.pacing {
             if l.native.prime.presumes() && !pacing.paced() {
-                None
+                pacing.consume_urgent();
+                (None, false)
             } else {
-                let Some(target) = pacing.next_frame().target() else { return Gate::Skip };
-                target
+                let opp = {
+                    let _dl = StageGuard::enter(FrameStage::DisplayLink);
+                    pacing.next_frame()
+                };
+                let Some(target) = opp.target() else { return Gate::Skip };
+                (target, opp.urgent_admitted())
             }
-        } else { None };
+        } else {
+            (None, false)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let urgent_admitted = false;
         #[cfg(target_os = "macos")]
         let shown = if !hidden && l.native.prime.presumes() {
             // A frame drawn while AppKit still launches the app isn't counted: AppKit says
@@ -340,6 +369,7 @@ impl FrameHost for WindowFrame<'_> {
                 Some(shown)
             } else {
                 self.host.meter.skipped();
+                self.state.redraw_stage.end();
                 self.host.missed_frame(Missed::Occluded, false);
                 return Gate::Skip;
             }
@@ -359,6 +389,7 @@ impl FrameHost for WindowFrame<'_> {
         self.state.hidden = hidden;
         self.state.live_resize = live_resize;
         self.state.target = target;
+        self.state.urgent_admitted = urgent_admitted;
         #[cfg(target_os = "macos")]
         {
             self.state.deferred = deferred;
@@ -406,7 +437,10 @@ impl FrameHost for WindowFrame<'_> {
             Gate::QuietTimer
         } else {
             #[cfg(target_os = "macos")]
-            if self.state.deferred && let Some(pacing) = &mut l.native.pacing { let _ = pacing.next_frame(); }
+            if self.state.deferred && let Some(pacing) = &mut l.native.pacing {
+                let _dl = StageGuard::enter(FrameStage::DisplayLink);
+                let _ = pacing.next_frame();
+            }
             Gate::Draw
         }
     }
@@ -436,6 +470,7 @@ impl FrameHost for WindowFrame<'_> {
     fn reblend(&mut self) -> bool { self.reblend_surface() }
 
     fn step_quiet(&mut self) -> StepInfo {
+        let _runtime = StageGuard::enter(FrameStage::Runtime);
         let now = crate::time::now();
         self.state.now = Some(now);
         self.host.app.rt_mut().host.window_resting = true;
@@ -490,6 +525,7 @@ impl FrameHost for WindowFrame<'_> {
         #[cfg(not(target_os = "macos"))]
         l.stop_pacing();
         self.host.meter.set_pacing(l.pacing_state(false));
+        self.state.redraw_stage.end();
         self.host.frame_reports.unchanged(self.state.target);
     }
 
@@ -497,6 +533,7 @@ impl FrameHost for WindowFrame<'_> {
         // It draws: the link starts, and still says draw at once.
         #[cfg(target_os = "macos")]
         if self.state.deferred && let Some(l) = self.host.win.as_mut() && let Some(pacing) = &mut l.native.pacing {
+            let _dl = StageGuard::enter(FrameStage::DisplayLink);
             let _ = pacing.next_frame();
         }
         crate::marks::mark_once(&FIRST_BUILD, "frame.first.build");
@@ -509,12 +546,15 @@ impl FrameHost for WindowFrame<'_> {
             return Acquire::Missed(Missed::Unconfigured);
         };
         let Some(surface) = l.surface.as_ref() else { return Acquire::Missed(Missed::Unconfigured) };
-        let frame = match acquire(surface, gpu, &l.config, l.surface_ok, 1, &mut self.host.meter) {
-            Ok(frame) => {
-                self.host.terminal_loss.note_frame_texture_acquired_direct();
-                frame
+        let frame = {
+            let _acquire = StageGuard::enter(FrameStage::Acquire);
+            match acquire(surface, gpu, &l.config, l.surface_ok, 1, &mut self.host.meter) {
+                Ok(frame) => {
+                    self.host.terminal_loss.note_frame_texture_acquired_direct();
+                    frame
+                }
+                Err(missed) => return Acquire::Missed(missed),
             }
-            Err(missed) => return Acquire::Missed(missed),
         };
         self.state.profile.mark_acquired();
         if !self.state.post_acquire_done {
@@ -546,6 +586,7 @@ impl FrameHost for WindowFrame<'_> {
     }
 
     fn step_runtime(&mut self) -> StepInfo {
+        let _runtime = StageGuard::enter(FrameStage::Runtime);
         let now = *self.state.now.get_or_insert_with(crate::time::now);
         let frame_time = self.state.target.unwrap_or(now);
         #[cfg(target_os = "macos")]
@@ -571,6 +612,7 @@ impl FrameHost for WindowFrame<'_> {
         };
         // `RUNE_LOOP_CHECK=1`: how the loop-only step this frame stood in for compares with it.
         self.state.profile.take_loop_check(self.host.app.rt_mut());
+        let _ = self.host.app.rt_mut().take_urgent_frame();
         let _ = self.host.poll_gpu_loss();
         StepInfo { runtime_animating: animating, animating, dt, update_ms: 0.0, presents_at: self.state.target }
     }
@@ -678,6 +720,7 @@ impl FrameHost for WindowFrame<'_> {
     }
 
     fn on_missed(&mut self, missed: Missed, stepped: bool) {
+        self.state.redraw_stage.end();
         if missed == Missed::Unconfigured {
             self.host.missed_frame(Missed::Unconfigured, stepped);
             return;
@@ -720,7 +763,7 @@ impl FrameHost for WindowFrame<'_> {
     }
 
     fn submit_and_present(&mut self, prepared: PreparedWindowFrame, info: &StepInfo) -> Instant {
-        submit_and_present_window(self.host, prepared, self.state.looped.as_ref(), &mut self.state.profile, &mut self.state.encoded, info)
+        submit_and_present_window(self.host, prepared, self.state.looped.as_ref(), &mut self.state.profile, &mut self.state.encoded, &mut self.state.drawable, &mut self.state.present_returned, info)
     }
 
     fn present_targets(&mut self) -> (Option<&mut FrameClock>, &mut RuntimeCore) {
@@ -731,8 +774,10 @@ impl FrameHost for WindowFrame<'_> {
         if self.host.poll_gpu_loss() { return; }
         let now = self.state.now.unwrap_or(submitted);
         if self.host.gpu.as_ref().is_none_or(|(gpu, _)| gpu.is_lost()) {
+            self.state.redraw_stage.end();
             #[cfg(target_os = "windows")]
             self.host.on_resize_sync_event(crate::window::win32::resize_sync::Event::DeviceLost);
+            self.host.reset_frame_presented();
             let outcome = if let Some(l) = self.host.win.as_mut() {
                 #[cfg(target_os = "windows")]
                 l.native.slot.reset();
@@ -772,19 +817,28 @@ impl FrameHost for WindowFrame<'_> {
                     .map(|p| p.with_ambient_period(self.host.ambient_period));
             }
         }
-        let frame_seq = self.host.frame_reports.drawn(self.state.encoded, info.presents_at, now, info.update_ms);
+        self.state.redraw_stage.end();
+        let frame_seq = self.host.frame_reports.drawn_with_present(self.state.encoded, self.state.present_returned, info.presents_at, now, info.update_ms, self.state.urgent_admitted);
         self.host.app.inspect_frame();
-        #[cfg(target_os = "macos")]
         let drawable = self.state.drawable;
-        #[cfg(not(target_os = "macos"))]
-        let drawable = None;
-        #[cfg(target_os = "macos")]
         if let (Some(frame_seq), Some(drawable_seq)) = (frame_seq, drawable) {
+            #[cfg(target_os = "macos")]
             self.host.frame_presented.push_and_drain(drawable_seq, frame_seq);
+            #[cfg(target_os = "windows")]
+            {
+                self.host.frame_presented.push_pending(drawable_seq, frame_seq);
+                self.host.poll_dxgi_present();
+            }
+            #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+            {
+                self.host.frame_presented.push_pending(drawable_seq, frame_seq);
+                self.host.poll_wayland_present();
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android")))))]
+            let _ = (frame_seq, drawable_seq);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = frame_seq;
-        if record_trace_frame(self.host, now, submitted, self.state.target, drawable) {
+        let trace_drawable = if cfg!(target_os = "macos") { drawable } else { None };
+        if record_trace_frame(self.host, now, submitted, self.state.target, trace_drawable) {
             return;
         }
         let Some(l) = self.host.win.as_mut() else { return };

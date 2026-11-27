@@ -46,11 +46,7 @@ impl Host {
         let size = self.args.size.unwrap_or(self.geometry.size);
         let launcher = self.launcher();
         let visible = !launcher && (self.started || self.options.visible);
-        let effective_theme = crate::window::window_theme_for_platform(
-            self.color_scheme,
-            crate::window::app_color_scheme(),
-            cfg!(target_os = "macos"),
-        );
+        let effective_theme = self.window_theme();
         #[allow(unused_mut)]
         let mut attrs = self.options.attributes_with_theme(
             self.app.rt().host.window_title.current().unwrap_or(self.geometry.title),
@@ -61,6 +57,19 @@ impl Host {
         ).with_active(focus);
         #[cfg(target_os = "macos")]
         if self.macos_window.nonactivating_panel { attrs = attrs.with_visible(false).with_active(false); }
+        #[cfg(target_os = "macos")]
+        let mac_screens = (self.logical_position.is_none() && self.options.position.is_some())
+            .then(crate::platform::macos::screen_bounds);
+        #[cfg(target_os = "macos")]
+        let mac_screens_ref = mac_screens.as_ref().map(|(s, f)| (s.as_slice(), *f));
+        #[cfg(not(target_os = "macos"))]
+        let mac_screens_ref = None;
+        attrs = crate::window::placement::apply_initial_position_attrs(
+            attrs,
+            self.logical_position,
+            &self.options,
+            mac_screens_ref,
+        );
         let panel = cfg!(target_os = "macos") && self.macos_window.nonactivating_panel;
         let plan = self.reopen.create_plan(self.options.resizable, panel);
         #[cfg(target_os = "windows")]
@@ -108,6 +117,8 @@ impl Host {
         #[cfg(target_os = "windows")]
         crate::platform::win32::press_point::install(&window);
         #[cfg(target_os = "windows")]
+        crate::platform::win32::touch_input::install(&window);
+        #[cfg(target_os = "windows")]
         crate::platform::win32::dark_mode::install_theme_refresh(&window);
         // Before it shows, so the title bar never appears.
         #[cfg(target_os = "windows")]
@@ -122,7 +133,8 @@ impl Host {
         #[cfg(target_os = "windows")]
         if visible && !cpu_first {
             // Unfocused (`App::open_inactive` or `WindowsWindowOptions::no_activate`), it never activates.
-            cloak.hold(&window, crate::time::now() + win::READY_FALLBACK, focus);
+            let until = crate::time::now() + win::READY_FALLBACK;
+            if open_as.full_screens() { cloak.hold_without_transitions(&window, until, focus); } else { cloak.hold(&window, until, focus); }
             window.set_visible(true);
             chrome::open_as(&window, open_as);
             if open_as != crate::windows::OpenAs::Normal {
@@ -512,7 +524,14 @@ impl Host {
             let last_maximized = window.is_maximized();
             Native { cloak, frame, mode, a11y_start, last_maximized, ..Default::default() }
         };
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        let native = Native {
+            wayland_present: (self.wayland && self.frame_presented.wanted())
+                .then(|| crate::platform::wayland::presentation::SurfacePresentation::for_window(&window))
+                .flatten(),
+            ..Default::default()
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows", all(unix, not(target_os = "ios"), not(target_os = "android")))))]
         let native = Native::default();
         let initial_mode = if self.gpu.as_ref().is_some_and(|(gpu, _)| gpu.adapter.get_info().device_type == wgpu::DeviceType::Cpu) {
             crate::gpu::fallback::GpuMode::Software
@@ -535,6 +554,7 @@ impl Host {
             corners: None,
             timer_frame: TimerFrame::default(),
             loop_frame: LoopFrame::default(),
+            damage: Default::default(),
             presented: None,
             #[cfg(target_os = "windows")]
             covered_draw: CoveredDraw::Current,
@@ -542,6 +562,8 @@ impl Host {
         });
         if launcher { self.win.as_mut().unwrap().first_frame.prepare(crate::time::now()); }
         self.app.rt_mut().set_renderer_kind(crate::RendererKind::Gpu);
+        #[cfg(target_os = "linux")]
+        self.apply_window_color_scheme();
         self.sync_window_backdrop(false);
         self.apply_placement(event_loop);
         #[cfg(target_os = "macos")]
@@ -676,6 +698,7 @@ impl Host {
         // A pass made on the device that went with it draws nothing: it goes too.
         w.corners = None;
         w.presented = None;
+        w.damage.reset();
         // Unregister any swap-chain wait before dropping the surface, even if replacement fails.
         #[cfg(target_os = "windows")]
         {
@@ -685,14 +708,18 @@ impl Host {
                 native.materials.on_device_loss(native.mode.handover_mut());
             }
             w.native.slot.reset();
-            w.native.damage.reset();
             self.on_resize_sync_event(crate::window::win32::resize_sync::Event::DeviceLost);
         }
         #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
         self.app.rt_mut().paint.set_windows_acrylic_materials(false);
         let Some(w) = self.win.as_mut() else { return Err(ReattachError::other("there is no window to draw into")) };
+        #[cfg(target_os = "windows")]
+        w.native.dxgi_present.reset();
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+        if let Some(wp) = w.native.wayland_present.as_mut() {
+            wp.reset();
+        }
         drop(w.surface.take());
-        #[cfg(target_os = "macos")]
         self.frame_presented.reset();
         self.gpu = None;
         self.app.release_compositor_gpu();
@@ -782,8 +809,9 @@ impl Host {
         w.config = config;
         w.surface_ok = true;
         w.alpha = alpha;
+        w.damage.reset();
         #[cfg(target_os = "windows")]
-        { w.native.slot.reset(); w.native.damage.reset(); }
+        { w.native.slot.reset(); w.native.dxgi_present.reset(); }
         #[cfg(target_os = "windows")]
         w.native.mode.rebind();
         #[cfg(target_os = "macos")]
@@ -822,8 +850,10 @@ impl Host {
         // The old surface goes first: a DX12 surface takes the visual's content, and the
         // committed tree keeps showing its last frame until the new one commits.
         w.native.slot.reset();
-        w.native.damage.reset();
+        w.native.dxgi_present.reset();
+        w.damage.reset();
         drop(w.surface.take());
+        self.frame_presented.reset();
         // SAFETY: the window keeps the visual's `Handover` as long as it keeps this surface.
         let surface = unsafe { gpu.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CompositionVisual(visual)) }.map_err(|e| e.to_string())?;
         let mut config = w.config.clone();
@@ -833,8 +863,8 @@ impl Host {
         w.config = config;
         w.surface_ok = true;
         w.presented = None;
+        w.damage.reset();
         w.native.slot.reset();
-        w.native.damage.reset();
         w.native.mode.rebind();
         Ok(true)
     }

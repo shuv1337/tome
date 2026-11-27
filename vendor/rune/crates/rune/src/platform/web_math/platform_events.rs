@@ -1,5 +1,5 @@
 //! Parsing and state-change checks for browser platform events (`init`, `viewport`, `motion`,
-//! `languages`, `primary_pointer`, `contrast`, `focus`, `visibility`). Kept out of
+//! `transparency`, `languages`, `primary_pointer`, `contrast`, `focus`, `visibility`). Kept out of
 //! `platform/web/input.rs`, which only compiles on `wasm32`, so the change-detection and startup
 //! snapshot rules run in headless Rust tests.
 #![cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
@@ -7,13 +7,7 @@
 use crate::app::SharedCore;
 use crate::runtime::{AppDriver, RuntimeCore};
 
-/// The page's primary pointer capability (`(hover: none)` and `(pointer: coarse)`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PrimaryPointer {
-    Hover,
-    NoHover,
-    Touch,
-}
+pub(crate) use crate::runtime::PrimaryPointer;
 
 pub(crate) fn parse_primary_pointer(event: &serde_json::Value) -> PrimaryPointer {
     match (event["hover"].as_bool(), event["coarse"].as_bool()) {
@@ -67,8 +61,27 @@ pub(crate) fn apply_motion(rt: &mut RuntimeCore, event: &serde_json::Value) -> b
     rt.set_system_reduced_motion(event["reduced"].as_bool().unwrap_or(false))
 }
 
+pub(crate) fn apply_transparency(rt: &mut RuntimeCore, event: &serde_json::Value) -> bool {
+    rt.set_system_reduced_transparency(event["reduced"].as_bool().unwrap_or(false))
+}
+
 pub(crate) fn apply_contrast(rt: &mut RuntimeCore, event: &serde_json::Value) -> bool {
-    rt.set_system_contrast(parse_contrast(&event["colors"]))
+    let colors = parse_contrast(&event["colors"]);
+    let increased = event["increased"].as_bool().unwrap_or(false) || colors.is_some();
+    let colors_changed = rt.set_system_contrast(colors);
+    let increased_changed = rt.set_system_increased_contrast(increased);
+    colors_changed || increased_changed
+}
+
+pub(crate) fn parse_text_scale(value: &serde_json::Value) -> f32 {
+    value
+        .as_f64()
+        .and_then(crate::platform::text_scale::from_f64)
+        .unwrap_or(crate::platform::text_scale::DEFAULT)
+}
+
+pub(crate) fn apply_text_scale(rt: &mut RuntimeCore, event: &serde_json::Value) -> bool {
+    rt.set_system_text_scale(parse_text_scale(&event["scale"]))
 }
 
 pub(crate) fn apply_languages(rt: &mut RuntimeCore, event: &serde_json::Value) -> bool {
@@ -163,7 +176,11 @@ pub(crate) fn apply_init(
 ) -> InitOutcome {
     let mut needs_frame = viewport_changed || pointer_changed;
     needs_frame |= apply_motion(rt, event);
+    needs_frame |= rt.set_system_reduced_transparency(
+        event["reducedTransparency"].as_bool().unwrap_or(false),
+    );
     needs_frame |= apply_contrast(rt, event);
+    needs_frame |= rt.set_system_text_scale(parse_text_scale(&event["textScale"]));
     let focus = apply_focus(rt, app, event);
     needs_frame |= focus.changed;
     let (action, clear_presented) = match apply_visibility(rt, app, shared, event) {

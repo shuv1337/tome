@@ -180,7 +180,10 @@ pub struct WindowOptions {
     pub click_through: bool,
     pub always_on_top: bool,
     pub visible: bool,
-    /// Physical desktop coordinates, not points. Use a display's position unchanged.
+    /// Physical desktop coordinates, not points. Use a display's position unchanged. On macOS,
+    /// resolved against connected displays' backing scales; for unambiguous mixed-scale placement
+    /// when physical display rects overlap, prefer [`App::logical_position`](crate::App::logical_position)
+    /// or [`App::window_placement`](crate::App::window_placement).
     pub position: Option<(i32, i32)>,
     /// Physical content size; overrides AppSpec's logical size when set.
     pub physical_size: Option<(u32, u32)>,
@@ -784,6 +787,10 @@ impl<S: 'static> WindowSpec<S> {
         srgb_blend(enabled: bool);
         /// This window's font smoothing (`App::font_smoothing`).
         font_smoothing(mode: crate::FontSmoothing);
+        /// Whether whole mouse-wheel notches glide rather than jump (`App::wheel_glide`).
+        wheel_glide(on: bool);
+        /// Window points scrolled per mouse-wheel line/notch (`App::wheel_line`).
+        wheel_line(points: f32);
         /// Maximum number of native `El::system_material` views this window may host at once
         /// (default [`crate::MAX_NATIVE_MATERIALS`], clamped to 64), like
         /// [`App::max_native_materials`].
@@ -904,6 +911,17 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         cpu_first(mode: crate::CpuFirst);
+        /// Configure native keyboard dispatch timing for this window, like
+        /// [`App::keyboard_dispatch`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, KeyboardDispatch, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("transport", AppSpec::new("Transport", (800.0, 520.0), || (), |_, _| el()))
+        ///     .keyboard_dispatch(KeyboardDispatch::Immediate);
+        /// let _ = spec;
+        /// ```
+        keyboard_dispatch(mode: crate::KeyboardDispatch);
         /// Configure the Windows drag-only synchronized resize path for this window, like
         /// [`App::resize_sync`].
         ///
@@ -1008,6 +1026,8 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         on_display_close(f: impl FnOnce() + 'static);
+        /// Runs on the UI thread when connected displays change, like [`App::on_displays`].
+        on_displays(f: impl FnMut(&crate::DisplayEvent, &[crate::Display]) + 'static);
         /// Reports each of this window's frames, like `App::on_frame_encoded`. A spec made with
         /// `WindowSpec::from_app` keeps its app's hook unless this replaces it; windows `App::window`
         /// adds have their own.
@@ -1028,6 +1048,13 @@ impl<S: 'static> WindowSpec<S> {
         on_frame_presented(f: impl FnMut(&crate::FramePresented) + 'static);
         /// Runs on the UI thread after each drawn frame of this window with its runtime, like `App::on_frame_drawn`.
         on_frame_drawn(f: impl FnMut(&crate::Runtime<S>) + 'static);
+        /// Reports each CPU wall-time frame, runtime, glyph/atlas, and text stage boundary for
+        /// this window, like [`App::on_frame_stage`].
+        on_frame_stage(f: impl FnMut(&crate::FrameStageEvent) + 'static);
+        /// Reports native key receipt on this window before routing, like [`App::on_window_key`].
+        on_window_key(f: impl FnMut(&crate::WindowKeyEvent) + 'static);
+        /// Reports native focus changes on this window, like [`App::on_window_focus`].
+        on_window_focus(f: impl FnMut(&crate::WindowFocusEvent) + 'static);
         /// Cap frame pacing (Hz) for motion no recent user input is steering in this window
         /// (`0.0`, default = uncapped display rate), like [`App::ambient_fps`].
         ///
@@ -1079,6 +1106,7 @@ impl<S: 'static> WindowSpec<S> {
     }
     pub fn options(mut self, options: WindowOptions) -> Self {
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = MacWindowOptions::default();
         self.app.windows_window = WindowsWindowOptions::default();
         self
@@ -1086,6 +1114,7 @@ impl<S: 'static> WindowSpec<S> {
     pub fn configured_options(mut self, options: ConfiguredWindowOptions) -> Self {
         let ConfiguredWindowOptions { options, native, windows } = options;
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = native;
         self.app.windows_window = windows;
         self

@@ -11,7 +11,7 @@ use super::stepping::FrameMove;
 use super::{Host, WindowApp};
 use crate::app::Shared;
 use crate::input::host_events;
-use crate::window::chrome::{self, sync_chrome_core};
+use crate::window::chrome::{self, sync_chrome_core, sync_platform_core};
 #[cfg(target_os = "macos")]
 use crate::window::chrome::mac;
 use crate::window::file_drop::{FileDrop, FileStep};
@@ -56,8 +56,71 @@ impl Host {
         self.shell(event_loop);
     }
 
+    /// Drains queued keyboard input immediately without acquiring, encoding, or presenting a
+    /// drawable when [`KeyboardDispatch::Immediate`](crate::KeyboardDispatch::Immediate) is
+    /// active for this window. Visual presentation still waits for normal frame pacing.
+    pub(in crate::window) fn dispatch_immediate_keyboard(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let policy = self.keyboard_dispatch.effective();
+        if !policy.is_immediate() {
+            return false;
+        }
+        if self.poll_gpu_loss() || !self.started || self.life.finished() {
+            return false;
+        }
+        if !self.app.rt().has_input_waiting() {
+            return false;
+        }
+        let now = crate::time::now();
+        let compositing = self.app.compositor_animating();
+        if !self.app.immediate_keyboard_step(policy, &mut self.clock, now, compositing) {
+            return false;
+        }
+        // Clear resting-frame caches so the next paced draw presents the updated frame and
+        // cannot take quiet-timer, loop-only, macOS satisfied-paint, or stale handover skips.
+        self.idle = false;
+        if let Some(l) = self.win.as_mut() {
+            l.presented = None;
+            l.timer_frame.no_longer_quiet();
+            l.loop_frame.touched();
+            #[cfg(target_os = "windows")]
+            if let crate::window::win32::handover::SurfaceMode::HandingOver { done, readback, paused, since, .. } = &mut l.native.mode {
+                if !*paused { crate::marks::mark("gpu.window.paused"); }
+                (*done, *readback, *paused, *since) = (None, None, true, now);
+            }
+            if self.life.shown() {
+                sync_platform_core(
+                    l,
+                    self.app.rt_mut(),
+                    &mut self.secure_input,
+                    &mut self.ime,
+                    self.ime_waits,
+                    &self.clipboard,
+                );
+                crate::haptics::flush_live(self.app.rt_mut(), self.life.uncovered() && !l.minimized());
+                if self.app.rt_mut().take_urgent_frame() && !l.backing_off(now) {
+                    l.admit_urgent_frame();
+                }
+            } else {
+                self.clipboard.flush_core(self.app.rt_mut());
+                crate::haptics::flush_live(self.app.rt_mut(), false);
+            }
+        } else {
+            self.clipboard.flush_core(self.app.rt_mut());
+            crate::haptics::flush_live(self.app.rt_mut(), false);
+        }
+        self.shell(event_loop);
+        if !self.life.finished()
+            && !event_loop.exiting()
+            && !self.gpu_loss_failed()
+            && let Some(w) = self.win.as_ref().filter(|_| self.life.shown() || self.launcher())
+        {
+            w.request_redraw();
+        }
+        true
+    }
+
     #[cfg(target_os = "macos")]
-    pub(in crate::window) fn fn_key(&mut self) {
+    pub(in crate::window) fn fn_key(&mut self, event_loop: Option<&ActiveEventLoop>) {
         if self.poll_gpu_loss() { return; }
         let changes = {
             let Some(l) = &self.win else { return };
@@ -73,19 +136,30 @@ impl Host {
                 key: winit::keyboard::KeyCode::Fn, mods: map_mods(self.mods), pressed, repeat: false, text: None, consumed_mods: Default::default(),
             }, None);
         }
-        if redraw && let Some(l) = &self.win { l.request_redraw(); }
+        if crate::window::should_redraw_after_polled_keys(redraw, event_loop, |el| self.dispatch_immediate_keyboard(el))
+            && let Some(l) = &self.win
+        {
+            l.request_redraw();
+        }
     }
 
     #[cfg(target_os = "macos")]
-    pub(in crate::window) fn media_keys(&mut self) {
+    pub(in crate::window) fn media_keys(&mut self, event_loop: Option<&ActiveEventLoop>) {
         if self.poll_gpu_loss() { return; }
-        let Some(l) = &self.win else { return };
-        let Some(events) = l.native.media_keys.as_ref().map(|m| m.take()) else { return };
+        let events = {
+            let Some(l) = &self.win else { return };
+            let Some(events) = l.native.media_keys.as_ref().map(|m| m.take()) else { return };
+            events
+        };
         let mut redraw = false;
         for (decoded, mods) in events {
             redraw |= self.app.media_key(decoded, mods);
         }
-        if redraw { l.request_redraw(); }
+        if crate::window::should_redraw_after_polled_keys(redraw, event_loop, |el| self.dispatch_immediate_keyboard(el))
+            && let Some(l) = &self.win
+        {
+            l.request_redraw();
+        }
     }
 
     /// Hands the runtime the file drag winit reported since the last pass, in order: the files
@@ -171,6 +245,7 @@ impl Host {
                 super::gpu_loss::LatchedWakeAction::NonGpuShell => match event {
                     WakeEvent::Focus(_) => self.focus(event_loop),
                     WakeEvent::Position(_, position) => self.set_position(event_loop, position),
+                    WakeEvent::LogicalPosition(_, position) => self.set_logical_position(event_loop, position),
                     WakeEvent::Place(_, place) => self.place(event_loop, place),
                     WakeEvent::Level(_, on) => self.set_always_on_top(event_loop, on),
                     WakeEvent::ExcludeFromCapture(_, exclude) => self.set_exclude_from_capture(exclude),
@@ -211,6 +286,7 @@ impl Host {
             }
             WakeEvent::Focus(_) => self.focus(event_loop),
             WakeEvent::Position(_, position) => self.set_position(event_loop, position),
+            WakeEvent::LogicalPosition(_, position) => self.set_logical_position(event_loop, position),
             WakeEvent::Place(_, place) => self.place(event_loop, place),
             WakeEvent::Level(_, on) => self.set_always_on_top(event_loop, on),
             WakeEvent::ExcludeFromCapture(_, exclude) => self.set_exclude_from_capture(exclude),
@@ -245,7 +321,7 @@ impl Host {
             WakeEvent::ResizeSync(_) => {}
             #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
             WakeEvent::MaterialPolicyChanged => {}
-            WakeEvent::Reopen | WakeEvent::Turn | WakeEvent::Quit(_) | WakeEvent::QuitRequest | WakeEvent::FileDrop | WakeEvent::LayerPending | WakeEvent::AppColorScheme => {}
+            WakeEvent::Reopen | WakeEvent::Turn | WakeEvent::Quit(_) | WakeEvent::QuitRequest | WakeEvent::FileDrop | WakeEvent::LayerPending | WakeEvent::AppColorScheme | WakeEvent::DisplaysChanged => {}
         }
     }
 
@@ -349,6 +425,7 @@ impl Host {
                 if stale { return; }
                 #[cfg(all(feature = "native-file-dialog", target_os = "linux"))]
                 if let Some(w) = &self.win { crate::file_dialog::window_focus(&w.window, focused && self.life.shown()); }
+                self.observability.report_focus(focused);
                 // Deliver independently of drawable availability, including hide/occlusion.
                 self.app.window_focus(focused);
                 // The key window's App takes the menu bar, so its items act in this window.
@@ -379,11 +456,16 @@ impl Host {
         // Minimised on Windows, where no occlusion event need say so.
         if matches!(event, WindowEvent::Resized(size) if size.width == 0 || size.height == 0) { self.rest_step(RestEvent::Unseen); }
         if let WindowEvent::Occluded(occluded) = event {
+            self.placement_watch.mark_dirty();
             crate::marks::mark(if occluded { "window.covered" } else { "window.uncovered" });
+            if !occluded && let Some(w) = self.win.as_mut() { w.damage.reset(); }
             // Alpha-zero launcher panels remain renderable on explicit invalidation.
             // Their native occlusion transitions must not settle or redraw a reveal.
             if !(self.macos_window.launcher && cfg!(target_os = "macos")) { self.set_cover(Cover::System, occluded); }
             return;
+        }
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+            self.placement_watch.mark_dirty();
         }
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }) { self.sync_origin(); }
         // A window the CPU renderer draws has no GPU yet; its input goes on all the same.
@@ -394,8 +476,16 @@ impl Host {
         let (chrome, titlebar) = (self.chrome, self.titlebar);
         // A finger presses through `WindowEvent::Touch`; the mouse events a system makes up
         // from it (Windows promotes touches) would press a second time.
-        if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. })
-            && (app.rt().touching() || host_events::touch_promoted()) { return; }
+        if matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. }) {
+            let (drop_event, dirty) = host_events::drop_touch_promoted_mouse(
+                app.rt_mut(),
+                !matches!(event, WindowEvent::CursorLeft { .. }),
+            );
+            if drop_event {
+                if dirty { l.request_redraw(); }
+                return;
+            }
+        }
         let record_reopen = |reopen: &mut crate::window::state::ReopenState, w: &Win, fit_height: bool| {
             if self.life.shown() {
                 reopen.record_live(
@@ -419,6 +509,7 @@ impl Host {
                 // current Core Animation transaction when a drag crosses displays so the new
                 // `contentsScale` and new-scale drawable land together with no flash.
                 if scale_changed {
+                    l.damage.reset();
                     let size = l.window.inner_size();
                     if size.width > 0 && size.height > 0 {
                         l.resize_surface(gpu, size);
@@ -457,7 +548,10 @@ impl Host {
                 // Restored where no occlusion event says so (Windows): as uncovering does, the
                 // first frame paints the settled state of what changed meanwhile.
                 let restored = !was_live && app.rt().live_visible();
-                if restored { app.rt_mut().settle_all(); }
+                if restored {
+                    l.damage.reset();
+                    app.rt_mut().settle_all();
+                }
                 if size.width == 0 || size.height == 0 {
                     self.secure_input.set(false);
                     l.stop_pacing();
@@ -522,6 +616,7 @@ impl Host {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                l.damage.reset();
                 #[cfg(target_os = "macos")]
                 if let Some(shadow) = &l.native.shadow { shadow.redraw(); }
                 let scale = scale_factor as f32;
@@ -614,11 +709,23 @@ impl Host {
                 if rt.stale() { l.request_redraw(); }
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
+                    crate::platform::wayland::serial::wire::drain_window(&l.window);
+                }
                 let pressed = event.state == ElementState::Pressed;
+                self.observability.report_key(
+                    pressed,
+                    event.repeat,
+                    app.rt().has_focus(),
+                    crate::input::time::current(),
+                );
                 if pressed { crate::marks::input_arrived(true); }
                 if pressed && let Some(text) = crate::platform::ime::take_direct_commit(&l.window) {
                     host_events::ime(app.rt_mut(), &l.window, &mut self.ime, winit::event::Ime::Commit(text));
-                    l.request_redraw();
+                    if !self.dispatch_immediate_keyboard(event_loop) && let Some(l) = &self.win {
+                        l.request_redraw();
+                    }
                     return;
                 }
                 // A menu item handing Rune its key: it acts after, if no handler takes it. So does
@@ -628,13 +735,19 @@ impl Host {
                     logical.as_ref().filter(|ev| ev.is_window_menu_chord() && chrome::has_window_menu(&l.window))
                         .map(|_| crate::runtime::Unhandled::WindowMenu)
                 });
-                if app.keyboard(&event, self.mods, unhandled) {
+                if app.keyboard(&event, self.mods, unhandled)
+                    && !self.dispatch_immediate_keyboard(event_loop)
+                    && let Some(l) = &self.win
+                {
                     l.request_redraw();
                 }
             }
             WindowEvent::Ime(ime) => {
+                let is_commit = matches!(ime, winit::event::Ime::Commit(_));
                 host_events::ime(app.rt_mut(), &l.window, &mut self.ime, ime);
-                l.request_redraw();
+                if !(is_commit && self.dispatch_immediate_keyboard(event_loop)) && let Some(l) = &self.win {
+                    l.request_redraw();
+                }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 host_events::wheel(app.rt_mut(), delta, gesture_phase(phase), scale, self.mods);
@@ -657,7 +770,7 @@ impl Host {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                if l.native.drag_serial.is_some() {
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
                     crate::platform::wayland::serial::wire::drain_window(&l.window);
                 }
                 let input_scale = app.rt().input_scale();
@@ -689,7 +802,7 @@ impl Host {
             }
             WindowEvent::Touch(touch) => {
                 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                if l.native.drag_serial.is_some() {
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
                     crate::platform::wayland::serial::wire::drain_window(&l.window);
                 }
                 #[cfg(target_os = "macos")]
@@ -710,7 +823,7 @@ impl Host {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-                if l.native.drag_serial.is_some() {
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
                     crate::platform::wayland::serial::wire::drain_window(&l.window);
                 }
                 if state == ElementState::Pressed {
@@ -742,6 +855,10 @@ impl Host {
                 l.request_redraw();
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
+                    crate::platform::wayland::serial::wire::drain_window(&l.window);
+                }
                 if let Some((x, y)) = button_at(app, &l.window) {
                     match state {
                         ElementState::Pressed => app.rt_mut().secondary_down(x, y),
@@ -755,6 +872,10 @@ impl Host {
                 l.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+                if self.wayland && crate::platform::wayland::serial::wire::has_listeners() {
+                    crate::platform::wayland::serial::wire::drain_window(&l.window);
+                }
                 if let Some((x, y)) = button_at(app, &l.window) {
                     match state {
                         ElementState::Pressed => app.button_down(x, y, pointer_button(button)),
@@ -847,21 +968,28 @@ impl Host {
         if let Some(l) = &self.win { l.redraw_step(RedrawEvent::Paint); }
         #[cfg(target_os = "macos")]
         let satisfied = self.win.as_ref().is_some_and(Win::take_redraw_on_paint);
-        // A new accent, scroller style, light/dark, reduced-motion or double-click preference asks
-        // every window to redraw.
+        // A new accent, scroller style, light/dark, contrast, reduced-motion or double-click
+        // preference asks every window to redraw.
         {
             let rt = self.app.rt_mut();
             rt.set_system_accent(crate::system_accent());
             rt.set_system_scroll_bars_state(crate::platform::scroll_bars::current().with_override(self.args.scroll_bars));
+            rt.set_system_text_scale(crate::platform::text_scale::cached());
+            #[cfg(target_os = "windows")]
+            rt.sync_windows_tablet_mode_if_changed();
             #[cfg(target_os = "linux")]
             {
                 rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
+                let has_contrast = rt.system_contrast().is_some();
+                rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(has_contrast));
                 rt.double_click_interval = crate::platform::preferences::double_click_interval();
             }
             if self.args.theme.is_none() && let Some(dark) = self.win.as_ref().and_then(|l| crate::platform::preferences::desktop_dark(&l.window)) {
                 rt.set_system_dark(dark);
             }
         }
+        #[cfg(target_os = "linux")]
+        self.apply_window_color_scheme();
         #[cfg(target_os = "macos")]
         if self.win.as_ref().is_some_and(|l| l.native.full_screen.take()) {
             if let Some(l) = self.win.as_ref() {
@@ -873,7 +1001,7 @@ impl Host {
         // `RedrawRequested` in winit's queue. Skip it while resting with nothing changed so it
         // cannot bump a coasting display link back to `Active` for a duplicate frame.
         #[cfg(target_os = "macos")]
-        if satisfied && self.win.as_ref().is_some_and(|l| l.presented.is_some()) {
+        if satisfied && self.win.as_ref().is_some_and(|l| l.presented.is_some() && !l.has_urgent_admission()) {
             let rt = self.app.rt();
             if !rt.stale() && !rt.live_pending() && !rt.has_pending_input() && rt.host.window_frame.is_none() {
                 return;
