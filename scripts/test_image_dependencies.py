@@ -179,6 +179,8 @@ class RecipeTests(unittest.TestCase):
         recipe = stage()
         self.assertIn("COPY vendor vendor", recipe)
         self.assertLess(recipe.index("COPY vendor vendor"), recipe.index("cargo fetch"))
+        publisher = (REPOSITORY / ".github/workflows/test-image.yml").read_text(encoding="utf-8")
+        self.assertIn("- vendor/**", publisher)
         self.assertIn(REPOSITORY / "vendor/rune/crates/rune/Cargo.toml", vendor_files(REPOSITORY))
         with tempfile.TemporaryDirectory() as scratch:
             repo = Path(scratch)
