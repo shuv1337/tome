@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::shape::LookParams;
-use crate::slots::{chrome, collection, columns, icons, list, scroll, sidebar};
+use crate::slots::{chrome, collection, columns, icons, list, scroll, sidebar, tabs};
 use crate::theme::{bundled_theme, parse_custom};
 use crate::tokens::{self, Kind};
 
@@ -41,6 +41,22 @@ fn s2_dark_refinements_apply_and_survive_with_params() {
         crate::theme::Rgba8::parse("#2a364a").expect("hex").color()
     );
     assert_eq!(
+        sidebar::selected_icon(&look),
+        crate::theme::Rgba8::parse("#e6ebf2").expect("hex").color()
+    );
+    assert_eq!(
+        tabs::underline_color(&look),
+        crate::theme::Rgba8::parse("#60a5fa").expect("hex").color()
+    );
+    assert_eq!(
+        tabs::badge_fill(&look),
+        crate::theme::Rgba8::parse("#1d2635").expect("hex").color()
+    );
+    assert_eq!(
+        tabs::badge_text(&look),
+        crate::theme::Rgba8::parse("#e6ebf2").expect("hex").color()
+    );
+    assert_eq!(
         collection::selected_fill(&look),
         crate::theme::Rgba8::parse("#1d2635").expect("hex").color()
     );
@@ -73,11 +89,11 @@ fn s2_dark_refinements_apply_and_survive_with_params() {
     );
     assert_eq!(
         icons::caption_selected_fill(&look),
-        crate::theme::Rgba8::parse("#1e2444").expect("hex").color()
+        crate::theme::Rgba8::parse("#1d2635").expect("hex").color()
     );
     assert_eq!(
         icons::caption_selected_text(&look),
-        crate::theme::Rgba8::parse("#a5b4fc").expect("hex").color()
+        crate::theme::Rgba8::parse("#e6ebf2").expect("hex").color()
     );
     assert_eq!(
         icons::frame_icon(&look),
@@ -92,16 +108,32 @@ fn s2_dark_refinements_apply_and_survive_with_params() {
         crate::theme::Rgba8::parse("#e6ebf2").expect("hex").color()
     );
     assert_eq!(
+        look.glow.color,
+        crate::theme::Rgba8::parse("#64748b").expect("hex").color()
+    );
+    assert_eq!(
         look.kit.c.surface_raised,
         crate::theme::Rgba8::parse("#161d28").expect("hex").color()
     );
     assert_eq!(
+        look.kit.c.bg_accent,
+        crate::theme::Rgba8::parse("#94a3b8").expect("hex").color()
+    );
+    assert_eq!(
+        look.kit.c.text_accent,
+        crate::theme::Rgba8::parse("#e6ebf2").expect("hex").color()
+    );
+    assert_eq!(
+        look.kit.c.icon_accent,
+        crate::theme::Rgba8::parse("#cbd5e1").expect("hex").color()
+    );
+    assert_eq!(
         look.kit.c.border_focus,
-        crate::theme::Rgba8::parse("#6366f1").expect("hex").color()
+        crate::theme::Rgba8::parse("#60a5fa").expect("hex").color()
     );
     assert_eq!(
         icons::frame_focus_ring(&look),
-        crate::theme::Rgba8::parse("#6366f1").expect("hex").color()
+        crate::theme::Rgba8::parse("#60a5fa").expect("hex").color()
     );
     assert_eq!(
         icons::frame_selected_hover_fill(&look),
