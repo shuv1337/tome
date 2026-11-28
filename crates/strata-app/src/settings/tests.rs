@@ -335,3 +335,59 @@ fn fresh_startup_applies_s2_dark_default_theme_and_slot_refinements() {
         },
     );
 }
+
+#[test]
+fn interface_font_applies_at_startup_and_propagates_across_windows() {
+    in_own_process(
+        &format!("{MODULE}::interface_font_applies_at_startup_and_propagates_across_windows"),
+        &[],
+        || {
+            let path = settings_path();
+            std::fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+            std::fs::write(
+                &path,
+                "mode = \"theme\"\ntheme = \"s2-dark\"\ninterface_font = \"Liberation Sans\"\n",
+            )
+            .expect("write startup settings");
+
+            let settings = startup::load_settings();
+            let ui = UiThread::claim().expect("the UI thread");
+            let mut first = Offscreen::new(ui, settings);
+            let mut second = Offscreen::new(ui, shell::share_settings(first.app()));
+
+            let startup_ui = "\"Liberation Sans\", JetBrains Mono";
+            for host in [&mut first, &mut second] {
+                assert!(
+                    host.run_until(PATIENCE, |h| {
+                        h.runtime_ref().font_families()
+                            == (startup_ui, strata_kit::fonts::FAMILIES.1)
+                    }),
+                    "saved interface_font must apply at startup before Settings opens"
+                );
+            }
+
+            first.runtime().update(|app, tx| {
+                shell::saved(app).change(|saved| saved.interface_font = Some("Noto Sans".into()));
+                shell::follow_look_tx(app, tx);
+            });
+            let switched_ui = "\"Noto Sans\", JetBrains Mono";
+            assert!(
+                second.run_until(PATIENCE, |h| {
+                    h.runtime_ref().font_families() == (switched_ui, strata_kit::fonts::FAMILIES.1)
+                }),
+                "second window adopts live interface_font change"
+            );
+
+            first.runtime().update(|app, tx| {
+                shell::saved(app).change(|saved| saved.interface_font = None);
+                shell::follow_look_tx(app, tx);
+            });
+            assert!(
+                second.run_until(PATIENCE, |h| {
+                    h.runtime_ref().font_families() == strata_kit::fonts::FAMILIES
+                }),
+                "clearing interface_font restores default families"
+            );
+        },
+    );
+}

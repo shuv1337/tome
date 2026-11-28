@@ -1238,7 +1238,7 @@ fn record_window_size(app: &mut App, [_, _, width, height]: [f32; 4]) {
 }
 
 pub(crate) fn poll(app: &mut App, clock: f64, tx: &mut Tx) -> bool {
-    let mut ran = settle(app, tx);
+    let mut ran = app.window.themes.sync_font_tx(&app.look, tx) | settle(app, tx);
     folder_views::poll(app, clock, tx);
     let parts = app.window.here.parts;
     for part in parts.active() {
