@@ -14,7 +14,7 @@ with owner-only permissions; an existing one keeps its permission bits.
 `crates/strata-app/src/theme.rs` and `crates/strata-app/src/appearance/` manage
 the theme catalog, `strata-kit::Look` synthesis, custom themes,
 system light/dark mode following, Omarchy following, and surface transparency.
-Fresh installations select Tokyo Night, unless an available Omarchy theme is
+Fresh installations select S2Code Dark (`s2-dark`), unless an available Omarchy theme is
 followed automatically. Saved theme choices remain unchanged. Folder peeking is
 off by default when no value is saved; explicitly saved choices are preserved.
 Enable it under **Settings → General → Browsing**. When enabled, automatic

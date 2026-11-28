@@ -80,6 +80,22 @@ fn s2_dark_refinements_apply_and_survive_with_params() {
         look.kit.c.border_focus,
         crate::theme::Rgba8::parse("#6366f1").expect("hex").color()
     );
+    assert_eq!(
+        icons::frame_focus_ring(&look),
+        crate::theme::Rgba8::parse("#6366f1").expect("hex").color()
+    );
+    assert_eq!(
+        icons::frame_selected_hover_fill(&look),
+        crate::theme::Rgba8::parse("#242f40").expect("hex").color()
+    );
+    assert_eq!(icons::caption_hover_fill(&look), look.kit.c.hover);
+    assert_eq!(look.kit.c.surface_hover, look.kit.c.hover);
+    assert_eq!(look.kit.c.surface_raised_hover, look.kit.c.hover);
+    let kit = theme.kit();
+    assert_eq!(kit.c.surface_raised, look.kit.c.surface_raised);
+    assert_eq!(kit.c.border_focus, look.kit.c.border_focus);
+    assert_eq!(kit.c.hover, look.kit.c.hover);
+    assert_eq!(kit.c.surface_hover, look.kit.c.surface_hover);
 }
 
 #[test]

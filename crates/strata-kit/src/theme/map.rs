@@ -18,7 +18,7 @@ impl Theme {
 
     /// The theme's kit, as [`Theme::look`] holds it.
     pub fn kit(&self) -> Kit {
-        kit(&self.colors)
+        self.look().kit
     }
 }
 

@@ -42,8 +42,13 @@ pub fn header_indicator(look: &Look) -> f32 {
     look.slots.columns.header_indicator.unwrap_or(3.0)
 }
 
+const DEFAULT_HEADER_TITLE_OPACITY: f32 = 0.58;
+
 pub fn header_title_opacity(look: &Look) -> f32 {
-    look.slots.columns.header_title_opacity.unwrap_or(0.58)
+    look.slots
+        .columns
+        .header_title_opacity
+        .unwrap_or(DEFAULT_HEADER_TITLE_OPACITY)
 }
 
 pub fn header_title_weight(look: &Look) -> f32 {
@@ -58,8 +63,17 @@ pub fn header_title_font(look: &Look) -> TextStyle {
     }
 }
 
-/// The inactive column header title's colour: `columns.header.inactive_title`, else `bg_accent` at [`header_title_opacity`].
+/// The inactive column header title's colour: `columns.header.inactive_title`, else `bg_accent` at 58 % opacity.
 pub fn header_inactive_title(look: &Look) -> Color {
+    look.slots
+        .columns
+        .header_inactive_title
+        .unwrap_or_else(|| fade(look, look.kit.c.bg_accent, DEFAULT_HEADER_TITLE_OPACITY))
+}
+
+/// The inactive column header title as drawn: an explicit `columns.header.inactive_title` override,
+/// otherwise `bg_accent` faded by [`header_title_opacity`].
+pub fn header_inactive_title_color(look: &Look) -> Color {
     look.slots
         .columns
         .header_inactive_title
