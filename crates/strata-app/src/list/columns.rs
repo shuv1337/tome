@@ -88,14 +88,18 @@ fn row<'a>(app: &'a App, rcx: &RowCx<'_>) -> Option<&'a Row> {
     app.list.single.pane.listing()?.row_at(rcx.index)
 }
 
+fn metadata_cell(app: &App, text: Option<String>) -> Cell {
+    Cell::text(text.unwrap_or_default()).color(strata_kit::slots::list::metadata_text(&app.look))
+}
+
 fn mode(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::mode_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text).mono()
 }
 
 fn size(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::size_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 fn kind(app: &App, rcx: &RowCx<'_>) -> Cell {
@@ -108,32 +112,33 @@ fn kind(app: &App, rcx: &RowCx<'_>) -> Cell {
             row.name(),
         ))
     });
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 fn modified(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::modified_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 fn duration(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::duration_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 fn dimensions(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::dimensions_cell(row.is_folder(), row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 fn created(app: &App, rcx: &RowCx<'_>) -> Cell {
     let text = row(app, rcx).map(|row| details::created_cell(row.facts()));
-    Cell::text(text.unwrap_or_default())
+    metadata_cell(app, text)
 }
 
 pub(super) fn cells_version(app: &App, rcx: &RowCx<'_>) -> u64 {
     let mut hasher = DefaultHasher::new();
     row(app, rcx).map(Row::facts).hash(&mut hasher);
+    strata_kit::slots::list::metadata_text(&app.look).hash(&mut hasher);
     app.list.date_format.as_str().hash(&mut hasher);
     if app.list.relative_dates {
         app.list.dates.epoch().hash(&mut hasher);

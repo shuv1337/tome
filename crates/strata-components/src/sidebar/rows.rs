@@ -138,7 +138,12 @@ pub(crate) fn over(top: rune::Color, bottom: rune::Color) -> rune::Color {
 }
 
 pub(crate) fn row_icon(look: &Look, i: &RowIcon, tint: Option<rune::Color>, selected: bool) -> El {
-    let badge_fill = tint.unwrap_or(look.kit.c.icon_accent);
+    let default_icon = if selected {
+        slot::selected_icon(look)
+    } else {
+        slot::row_icon(look)
+    };
+    let badge_fill = tint.unwrap_or(default_icon);
     match i {
         RowIcon::Catalog(name) => crate::thumbnails::folder_badge(
             look,
@@ -153,13 +158,7 @@ pub(crate) fn row_icon(look: &Look, i: &RowIcon, tint: Option<rune::Color>, sele
             badge_fill,
         ),
         RowIcon::Name(n) => {
-            let colour = tint.unwrap_or_else(|| {
-                if selected {
-                    slot::selected_icon(look)
-                } else {
-                    look.kit.c.icon_accent
-                }
-            });
+            let colour = tint.unwrap_or(default_icon);
             icon(look.icon(*n), look.icon_size.md).color(colour)
         }
     }
@@ -327,6 +326,11 @@ fn dress<S>(ctx: &Ctx<'_, S>, el: El, spec: &Spec<'_>) -> El {
     }
     if hovered {
         el = el.border(1.0, c.border_focus);
+    } else if spec.selected {
+        let border = slot::selected_border(look);
+        if border.a > 0.0 {
+            el = el.border(1.0, border);
+        }
     }
     el = el.hover(if dragging {
         rune::Color::TRANSPARENT
@@ -452,7 +456,7 @@ fn device_actions<S: 'static>(ctx: &Ctx<'_, S>, d: &Device) -> El {
         let emit = ctx.emit.clone();
         let glyph = icon(look.icon(glyph), icon_size)
             .key("icon")
-            .color(look.kit.c.icon_accent)
+            .color(slot::row_icon(look))
             .group_opacity(0.75, 1.0)
             .opacity_motion(rune::Anim::INSTANT)
             .a11y_hidden();

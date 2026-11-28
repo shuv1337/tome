@@ -90,3 +90,61 @@ fn scroll_hover_width_token_toggles_optional_hover_thickness() {
     tokens::set(&mut look, "scroll.bar.hover_width", Value::Length(0.0)).expect("clear");
     assert_eq!(super::scroll::hover_width(&look), None);
 }
+
+#[test]
+fn chrome_sidebar_and_collection_color_slots_default_and_override() {
+    let mut look = Look::fallback(true);
+    assert_eq!(super::chrome::action_icon(&look), look.kit.c.icon_accent);
+    assert_eq!(super::chrome::current_text(&look), look.kit.c.text_accent);
+    assert_eq!(super::sidebar::row_icon(&look), look.kit.c.icon_accent);
+    assert_eq!(
+        super::sidebar::selected_border(&look),
+        rune::Color::TRANSPARENT
+    );
+    assert_eq!(super::collection::entry_icon(&look), look.kit.c.icon_accent);
+    assert_eq!(
+        super::collection::selected_fill(&look),
+        look.kit.alpha(look.fill.highlight, 0.24)
+    );
+    assert_eq!(
+        super::collection::selected_border(&look),
+        rune::Color::TRANSPARENT
+    );
+    assert_eq!(super::collection::hover_fill(&look), look.kit.c.hover);
+    assert_eq!(super::list::metadata_text(&look), look.kit.c.text_base);
+    assert_eq!(
+        super::columns::header_inactive_title(&look),
+        super::columns::fade(
+            &look,
+            look.kit.c.bg_accent,
+            super::columns::header_title_opacity(&look),
+        )
+    );
+
+    let custom = crate::theme::Rgba8::parse("#7c8aa0").expect("hex").color();
+    for name in [
+        "chrome.action.icon",
+        "chrome.current.text",
+        "sidebar.row.icon",
+        "sidebar.selected.border",
+        "collection.entry.icon",
+        "collection.selected.fill",
+        "collection.selected.border",
+        "collection.hover.fill",
+        "columns.header.inactive_title",
+        "list.metadata.text",
+    ] {
+        tokens::set(&mut look, name, Value::Color(custom)).expect("set color slot");
+        assert_eq!(tokens::get(&look, name).expect("get"), Value::Color(custom));
+    }
+    assert_eq!(super::chrome::action_icon(&look), custom);
+    assert_eq!(super::chrome::current_text(&look), custom);
+    assert_eq!(super::sidebar::row_icon(&look), custom);
+    assert_eq!(super::sidebar::selected_border(&look), custom);
+    assert_eq!(super::collection::entry_icon(&look), custom);
+    assert_eq!(super::collection::selected_fill(&look), custom);
+    assert_eq!(super::collection::selected_border(&look), custom);
+    assert_eq!(super::collection::hover_fill(&look), custom);
+    assert_eq!(super::columns::header_inactive_title(&look), custom);
+    assert_eq!(super::list::metadata_text(&look), custom);
+}

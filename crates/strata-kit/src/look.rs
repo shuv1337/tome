@@ -148,7 +148,7 @@ impl Look {
 
     pub fn accent_icon_kit(&self) -> Kit {
         let mut kit = self.kit.clone();
-        let accent = kit.c.icon_accent;
+        let accent = crate::slots::chrome::action_icon(self);
         kit.c.text_base = accent;
         kit.c.icon_base = accent;
         kit.c.icon_muted = accent;

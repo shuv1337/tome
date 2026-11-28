@@ -102,12 +102,12 @@ pub(crate) fn bar(app: &App, view: &str, title: &str, own: Option<El>) -> El {
         .focusable(false)
         .preserve_focus_on_press(true);
     let heading_font = rune::TextStyle {
-        weight: 700.0,
+        weight: 600.0,
         ..look.kit.ty.ui_medium
     };
     let heading = text(title.to_owned())
         .font(heading_font)
-        .color(look.kit.c.text_accent)
+        .color(strata_kit::slots::chrome::current_text(look))
         .truncate_middle()
         .shrink()
         .min_w(0.0)

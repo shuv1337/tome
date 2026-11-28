@@ -12,8 +12,8 @@ mod tests;
 
 const CATALOG: &str = include_str!("../../themes/catalog.toml");
 
-/// The theme a fresh start uses: Tokyo Night.
-pub const DEFAULT_ID: &str = "tokyo-night";
+/// The theme a fresh start uses: S2Code Dark.
+pub const DEFAULT_ID: &str = "s2-dark";
 
 /// The theme a saved id that matches nothing falls back to: Azure Glow.
 pub const UNKNOWN_ID_FALLBACK: &str = "azure-glow";
@@ -21,7 +21,14 @@ pub const UNKNOWN_ID_FALLBACK: &str = "azure-glow";
 /// Every bundled theme, sorted by lowercase name.
 pub fn bundled() -> &'static [Theme] {
     static THEMES: OnceLock<Vec<Theme>> = OnceLock::new();
-    THEMES.get_or_init(|| parse(CATALOG).unwrap_or_else(|e| panic!("themes/catalog.toml: {e}")))
+    THEMES.get_or_init(|| {
+        let mut themes = parse(CATALOG).unwrap_or_else(|e| panic!("themes/catalog.toml: {e}"));
+        let tome =
+            parse(super::tome::CATALOG).unwrap_or_else(|e| panic!("themes/tome/catalog.toml: {e}"));
+        themes.extend(tome);
+        themes.sort_by_key(|t| t.name.to_lowercase());
+        themes
+    })
 }
 
 /// The bundled theme with id `id`.

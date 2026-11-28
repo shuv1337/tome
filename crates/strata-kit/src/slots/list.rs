@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+use rune::Color;
+
 use crate::look::Look;
 use crate::tokens::Token;
 
@@ -12,6 +14,7 @@ pub struct List {
     pub heading_pad: Option<f32>,
     pub cell_pad: Option<f32>,
     pub reorder_width: Option<f32>,
+    pub metadata_text: Option<Color>,
 }
 
 /// A ListTable row's height: `list.row.height`, else `row.list`.
@@ -36,6 +39,14 @@ pub fn reorder_width(look: &Look) -> f32 {
     look.slots.list.reorder_width.unwrap_or(3.0)
 }
 
+/// Secondary list metadata column text colour: `list.metadata.text`, else `kit.c.text_base`.
+pub fn metadata_text(look: &Look) -> Color {
+    look.slots
+        .list
+        .metadata_text
+        .unwrap_or(look.kit.c.text_base)
+}
+
 pub const TOKENS: &[Token] = &[
     Token::length("list.row.height", row_height, |l, v| {
         l.slots.list.row_height = Some(v)
@@ -51,5 +62,8 @@ pub const TOKENS: &[Token] = &[
     }),
     Token::length("list.reorder.width", reorder_width, |l, v| {
         l.slots.list.reorder_width = Some(v)
+    }),
+    Token::color("list.metadata.text", metadata_text, |l, v| {
+        l.slots.list.metadata_text = Some(v)
     }),
 ];

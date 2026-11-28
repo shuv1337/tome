@@ -341,6 +341,14 @@ pub(super) fn look_key(look: &Look) -> u64 {
     ] {
         v.to_bits().hash(&mut h);
     }
+    for c in [
+        tokens::entry_icon(look),
+        tokens::selected_fill(look),
+        tokens::selected_border(look),
+        tokens::hover_fill(look),
+    ] {
+        color_key(c).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -484,7 +492,7 @@ fn row_fill(look: &Look, state: RowState) -> Option<rune::Color> {
     } else if state.marks.active_path {
         Some(tokens::active_path_fill(look))
     } else if state.selected || state.drop_target {
-        Some(rune_kit::TableStyle::from_kit(&look.kit).selected)
+        Some(tokens::selected_fill(look))
     } else if state.marks.peek_anchor {
         Some(tokens::peek_fill(look))
     } else {
@@ -577,9 +585,15 @@ fn item<S: 'static>(cfg: &Rc<Config<S>>, frame: &Frame, s: &S, rcx: &RowCx<'_>) 
     if let Some(fill) = row_fill(look, state) {
         inner = inner.fill(fill);
     }
+    if state.selected {
+        let border = tokens::selected_border(look);
+        if border.a > 0.0 {
+            inner = inner.border(OUTLINE, border);
+        }
+    }
     // Keep ancestor open-folder fills steady without stacking a hover overlay on top.
     if row_hover_enabled(frame, state) {
-        inner = inner.hover(kit.c.hover);
+        inner = inner.hover(tokens::hover_fill(look));
     }
     if state.cursor_shown {
         inner = inner.outline(OUTLINE, -OUTLINE, kit.c.border_focus);
@@ -712,7 +726,7 @@ fn default_icon(rcx: &RowCx<'_>) -> El {
             look,
             rcx.entry,
             look.icon_size.md,
-            look.kit.c.icon_accent,
+            tokens::entry_icon(look),
         )
         .key(ICON),
     }

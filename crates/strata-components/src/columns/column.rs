@@ -371,7 +371,7 @@ pub(super) fn header<S: 'static>(sh: &Rc<Shared<S>>, s: &S, depth: usize, serial
     let color = if header_active {
         k.c.text_base
     } else {
-        tokens::fade(look, k.c.bg_accent, tokens::header_title_opacity(look))
+        tokens::header_inactive_title_color(look)
     };
     let mut bar = row()
         .key(keys::header(&key))

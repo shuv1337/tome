@@ -72,7 +72,7 @@ fn heading_body<S>(
     };
     let chevron = icon(look.icon(chevron_name), action_icon_size(look))
         .key("chevron")
-        .color(c.icon_accent)
+        .color(slot::row_icon(look))
         .opacity(0.65)
         .a11y_hidden();
     if ctx.rail {

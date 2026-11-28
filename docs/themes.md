@@ -1,6 +1,6 @@
 # Themes
 
-Strata styles the interface with nine semantic color tokens. Bundled themes are the fallback on any Linux desktop; Tokyo Night is the default, and Azure Glow is used when a saved theme ID is not recognized. Settings presents all 95 bundled themes in one searchable, light/dark-filterable scrolling catalog.
+Strata styles the interface with nine semantic color tokens. Bundled themes are the fallback on any Linux desktop; S2Code Dark (`s2-dark`) is Tome's default, and Azure Glow is used when a saved theme ID is not recognized. Settings presents all 96 bundled themes in one searchable, light/dark-filterable scrolling catalog.
 
 ## System light/dark mode
 
@@ -133,7 +133,7 @@ From then on, every matugen run recolors open windows. Shells that run user matu
 
 ## Syntax colors
 
-All 95 bundled themes include explicit code-preview palettes. Tinted Base16 palettes map `base0E` to keywords, `base0B` to strings, `base09` to constants, `base0A` to types, and `base0C` to preprocessor directives. Catppuccin and Tokyo Night use the pinned `catppuccin-mocha` and `tokyo-night-dark` syntax palettes; Azure Glow and Omarchy Light have original curated palettes.
+All 96 bundled themes include explicit code-preview palettes. Tinted Base16 palettes map `base0E` to keywords, `base0B` to strings, `base09` to constants, `base0A` to types, and `base0C` to preprocessor directives. Catppuccin and Tokyo Night use the pinned `catppuccin-mocha` and `tokyo-night-dark` syntax palettes; S2Code Dark, Azure Glow, and Omarchy Light have original curated palettes.
 
 Under **Settings → Appearance → Add theme**, the syntax color pickers start with the selected theme's colors. Each picker previews changes immediately in open code previews; Cancel restores the selected theme, and Add theme saves all five syntax colors with the interface palette. Closing Settings by any route (Escape, Close settings, a click outside it, or closing the window) discards an unsaved preview the same way. Opening the editor again starts from the selected theme's colors. Changing text size or glow while previewing keeps the preview until it is cancelled or saved. **Dim text / comments** controls comments as well as dim interface text. Markdown headings continue to use the accent color.
 

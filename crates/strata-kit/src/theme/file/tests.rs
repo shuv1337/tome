@@ -130,14 +130,14 @@ fn a_custom_theme_replaces_the_bundled_one_with_its_id() {
     let dracula = parse_custom("dracula", OCEAN).expect("loads");
     let extra = parse_custom("ocean", &with_line(OCEAN, "name", "\"Abyss\"")).expect("loads");
     let lib = Library::new(vec![dracula, extra]);
-    assert_eq!(lib.themes().len(), 96);
+    assert_eq!(lib.themes().len(), 97);
     let found = lib.get("dracula").expect("listed");
     assert_eq!(
         (found.source, found.name.as_str()),
         (Source::Custom, "Ocean Blue")
     );
     assert_eq!(lib.themes().iter().filter(|t| t.id == "dracula").count(), 1);
-    let tail: Vec<&str> = lib.themes()[94..].iter().map(|t| t.name.as_str()).collect();
+    let tail: Vec<&str> = lib.themes()[95..].iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tail,
         ["Abyss", "Ocean Blue"],
@@ -148,7 +148,7 @@ fn a_custom_theme_replaces_the_bundled_one_with_its_id() {
 #[test]
 fn a_selection_resolves_to_the_default_or_the_fallback() {
     let lib = Library::default();
-    assert_eq!(lib.resolve(None).id, "tokyo-night");
+    assert_eq!(lib.resolve(None).id, "s2-dark");
     assert_eq!(lib.resolve(Some("no-such-theme")).id, "azure-glow");
     assert_eq!(lib.resolve(Some("nord")).id, "nord");
 }

@@ -9,7 +9,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             mode: "theme".to_owned(),
-            theme: "tokyo-night".to_owned(),
+            theme: "s2-dark".to_owned(),
             legacy_omarchy_variant: None,
             omarchy_variants: HashMap::new(),
             folder_peeking: false,

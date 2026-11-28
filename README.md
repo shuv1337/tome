@@ -60,7 +60,7 @@ Strata combines spatial Miller-column navigation with familiar Icons and List vi
 - **Everyday file operations:** create folders, rename, cut, copy, paste, trash, permanent delete, sorting, hidden files, pins, and history. [Drop images, selected text, and web links](docs/content-drops.md) from a browser into a folder to save them as files; a dropped link is saved as a link file and never fetched.
 - **Remote locations:** browse GIO/GVfs locations such as authenticated SMB shares and SFTP servers from the location field, with explicit host-key decisions.
 - **Administrator access:** open a local folder you can't read, such as a root-owned backup folder, after the system's polkit password prompt. See [Administrator access](docs/administrator-access.md).
-- **Adaptive appearance:** compact or airy density, 95 bundled themes, custom themes, live Omarchy Quattro theme following, and live variable surface transparency with frosted glass (Wayland `ext_background_effect_v1` / KWin compositor blur and GPU backdrop blur).
+- **Adaptive appearance:** compact or airy density, 96 bundled themes, custom themes, live Omarchy Quattro theme following, and live variable surface transparency with frosted glass (Wayland `ext_background_effect_v1` / KWin compositor blur and GPU backdrop blur).
 - **Updates in the app:** automatic update checks (on by default; turn them off in **Settings → Updates**), release notes, verified downloads, and in-place installation for release binaries.
 - **Custom actions:** add your own scripts to the file and folder context menus, with a manager in **Settings → Actions** and background progress in the Jobs dashboard. See [Custom actions](docs/custom-actions.md).
 - **Integrations:** opt-in providers maintained in the repository's [`integrations/`](integrations/README.md) catalog, installed, updated and removed from **Settings → Integrations**; they plug services and devices into the context menu and the **Send to…** menu. See [External file providers](docs/file-providers.md).
@@ -820,7 +820,7 @@ This integration supports Omarchy Quattro only. The switch is hidden when Strata
 
 ### Bundled themes
 
-Choose any of the 95 included themes from the searchable, light/dark-filterable library under **Settings → Appearance**, including Tokyo Night (the default), Azure Glow, Catppuccin, Everforest, Rosé Pine, Gruvbox, Nord, Dracula, Solarized, and Omarchy Light. Selecting a bundled theme turns off Omarchy following and keeps that theme active across restarts. While **Follow system light/dark mode** is on, the selection instead changes the theme family Strata switches within.
+Choose any of the 96 included themes from the searchable, light/dark-filterable library under **Settings → Appearance**, including S2Code Dark (the default), Tokyo Night, Azure Glow, Catppuccin, Everforest, Rosé Pine, Gruvbox, Nord, Dracula, Solarized, and Omarchy Light. Selecting a bundled theme turns off Omarchy following and keeps that theme active across restarts. While **Follow system light/dark mode** is on, the selection instead changes the theme family Strata switches within.
 
 ### Custom themes
 

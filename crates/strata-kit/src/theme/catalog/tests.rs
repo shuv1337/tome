@@ -10,13 +10,13 @@ fn theme(id: &str) -> &'static Theme {
     bundled_theme(id).unwrap_or_else(|| panic!("{id} is bundled"))
 }
 
-/// settings/themes: "Settings → Appearance lists 95 bundled themes in alphabetical order".
+/// settings/themes: "Settings → Appearance lists 96 bundled themes in alphabetical order" (95 upstream + S2Code Dark).
 #[test]
-fn ninety_five_themes_load_with_unique_ids_in_alphabetical_order() {
+fn bundled_themes_load_with_unique_ids_in_alphabetical_order() {
     let themes = bundled();
-    assert_eq!(themes.len(), 95);
+    assert_eq!(themes.len(), 96);
     let ids: BTreeSet<&str> = themes.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(ids.len(), 95, "ids are unique");
+    assert_eq!(ids.len(), 96, "ids are unique");
     let names: Vec<String> = themes.iter().map(|t| t.name.to_lowercase()).collect();
     assert!(names.windows(2).all(|w| w[0] <= w[1]), "{names:?}");
     assert!(themes.iter().all(|t| t.source == Source::Bundled));

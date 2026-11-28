@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub const USAGE: &str =
     "usage: shell [--theme ID] [--overrides PATH] [--native] [--all-buttons] [PATH…]
 
-  --theme ID        a bundled theme (default: tokyo-night)
+  --theme ID        a bundled theme (default: s2-dark)
   --overrides PATH  the overrides file to watch (default: $XDG_CONFIG_HOME/strata/overrides.toml);
                     read only, never written
   --native          keep the window manager's frame

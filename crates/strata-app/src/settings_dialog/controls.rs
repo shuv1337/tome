@@ -281,7 +281,10 @@ fn build_row_copy(ctx: PageCtx<'_>, spec: &RowSpec<'_>, stacked: bool) -> El {
     if spec.indented {
         title_line = title_line.child(
             icon(look.icon(IconName::Enter), look.icon_size.sm)
-                .color(look.kit.alpha(c.icon_accent, 0.65))
+                .color(
+                    look.kit
+                        .alpha(strata_kit::slots::chrome::action_icon(look), 0.65),
+                )
                 .a11y_hidden(),
         );
     }

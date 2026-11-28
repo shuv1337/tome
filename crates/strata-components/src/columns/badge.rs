@@ -207,7 +207,7 @@ fn folder_chevron(look: &Look, rcx: &RowCx<'_>) -> El {
         0.55
     };
     let chevron = icon(look.icon(IconName::ChevronRight), look.icon_size.sm)
-        .color(look.kit.c.icon_accent)
+        .color(strata_kit::slots::collection::entry_icon(look))
         .a11y_hidden();
     if opacity < 1.0 {
         chevron.opacity(opacity)
