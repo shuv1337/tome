@@ -124,6 +124,11 @@ impl Offscreen {
         &mut self.runtime
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime_ref(&self) -> &Runtime<App> {
+        &self.runtime
+    }
+
     pub(crate) fn modifiers(&mut self, mods: Mods) {
         self.runtime.physical_input(PhysicalInput::Modifiers(mods));
         self.runtime.update_if(|app, tx| {

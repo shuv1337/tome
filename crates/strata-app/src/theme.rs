@@ -19,7 +19,7 @@ use strata_fs::adapters::{Watched, watch};
 use strata_kit::{
     fonts::FAMILIES,
     icons::{catppuccin, lucide},
-    look::{Look, LookParams},
+    look::{Families, Look, LookParams},
     theme::{Library, Theme, omarchy, parse_custom, switch},
     transparency::TransparencyParams,
 };
@@ -76,6 +76,7 @@ pub(crate) struct ThemeEngine {
     omarchy: Option<OmarchyState>,
     gnome_settings: Option<gio::Settings>,
     system_dark: bool,
+    applied_font: Option<Option<Families>>,
     _watches: Vec<LoadHandle>,
 }
 
@@ -113,6 +114,7 @@ impl ThemeEngine {
             omarchy,
             gnome_settings,
             system_dark,
+            applied_font: None,
             _watches: watches,
         }
     }
@@ -198,13 +200,20 @@ impl ThemeEngine {
         *look = self.build_look(saved, ctx);
     }
 
-    pub(crate) fn apply_tx(&self, look: &mut Look, next: Look, tx: &mut Tx) {
-        if next.font != look.font {
-            match &next.font {
-                Some(families) => tx.set_font_families(families.ui.clone(), families.mono.clone()),
-                None => tx.set_font_families(FAMILIES.0, FAMILIES.1),
-            }
+    pub(crate) fn sync_font_tx(&mut self, look: &Look, tx: &mut Tx) -> bool {
+        if self.applied_font.as_ref() == Some(&look.font) {
+            return false;
         }
+        self.applied_font = Some(look.font.clone());
+        match &look.font {
+            Some(families) => tx.set_font_families(families.ui.clone(), families.mono.clone()),
+            None => tx.set_font_families(FAMILIES.0, FAMILIES.1),
+        }
+        true
+    }
+
+    pub(crate) fn apply_tx(&mut self, look: &mut Look, next: Look, tx: &mut Tx) {
+        self.sync_font_tx(&next, tx);
         switch(look, next, tx);
     }
 
