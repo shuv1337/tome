@@ -374,6 +374,11 @@ fn interface_font_applies_at_startup_and_propagates_across_windows() {
             assert!(
                 second.run_until(PATIENCE, |h| {
                     h.runtime_ref().font_families() == (switched_ui, strata_kit::fonts::FAMILIES.1)
+                        && h.app()
+                            .look
+                            .font
+                            .as_ref()
+                            .is_some_and(|f| f.ui == switched_ui)
                 }),
                 "second window adopts live interface_font change"
             );
@@ -385,8 +390,47 @@ fn interface_font_applies_at_startup_and_propagates_across_windows() {
             assert!(
                 second.run_until(PATIENCE, |h| {
                     h.runtime_ref().font_families() == strata_kit::fonts::FAMILIES
+                        && h.app().look.font.is_none()
                 }),
                 "clearing interface_font restores default families"
+            );
+        },
+    );
+}
+
+#[test]
+fn later_window_with_default_font_clears_earlier_threads_custom_font() {
+    in_own_process(
+        &format!("{MODULE}::later_window_with_default_font_clears_earlier_threads_custom_font"),
+        &[],
+        || {
+            let path = settings_path();
+            std::fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+            std::fs::write(
+                &path,
+                "mode = \"theme\"\ntheme = \"s2-dark\"\ninterface_font = \"Liberation Sans\"\n",
+            )
+            .expect("write custom font settings");
+
+            let ui = UiThread::claim().expect("the UI thread");
+            let mut first = Offscreen::new(ui, startup::load_settings());
+            let custom_ui = "\"Liberation Sans\", JetBrains Mono";
+            assert!(
+                first.run_until(PATIENCE, |h| {
+                    h.runtime_ref().font_families() == (custom_ui, strata_kit::fonts::FAMILIES.1)
+                }),
+                "first window applies saved custom font"
+            );
+            drop(first);
+
+            std::fs::write(&path, "mode = \"theme\"\ntheme = \"s2-dark\"\n")
+                .expect("write default font settings");
+            let mut second = Offscreen::new(ui, startup::load_settings());
+            assert!(
+                second.run_until(PATIENCE, |h| {
+                    h.runtime_ref().font_families() == strata_kit::fonts::FAMILIES
+                }),
+                "later window with default font clears stale thread-local custom font"
             );
         },
     );

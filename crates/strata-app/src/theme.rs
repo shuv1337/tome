@@ -76,7 +76,7 @@ pub(crate) struct ThemeEngine {
     omarchy: Option<OmarchyState>,
     gnome_settings: Option<gio::Settings>,
     system_dark: bool,
-    applied_font: Option<Families>,
+    applied_font: Option<Option<Families>>,
     _watches: Vec<LoadHandle>,
 }
 
@@ -201,10 +201,10 @@ impl ThemeEngine {
     }
 
     pub(crate) fn sync_font_tx(&mut self, look: &Look, tx: &mut Tx) -> bool {
-        if self.applied_font == look.font {
+        if self.applied_font.as_ref() == Some(&look.font) {
             return false;
         }
-        self.applied_font = look.font.clone();
+        self.applied_font = Some(look.font.clone());
         match &look.font {
             Some(families) => tx.set_font_families(families.ui.clone(), families.mono.clone()),
             None => tx.set_font_families(FAMILIES.0, FAMILIES.1),
