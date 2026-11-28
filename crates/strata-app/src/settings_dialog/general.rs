@@ -722,7 +722,7 @@ fn sidebar_place_chip(app: &App, idx: usize, place: PlaceToggle) -> El {
             chip_bg,
             panel_border(look),
             c.text_muted,
-            kit.alpha(c.icon_accent, 0.65),
+            kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.65),
         )
     };
     let pill_radius = look.round(999.0).min(14.0);

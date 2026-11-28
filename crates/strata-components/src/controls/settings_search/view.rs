@@ -350,7 +350,7 @@ impl<S: 'static> SettingsSearch<S> {
             .min_w(0.0)
             .child(
                 icon(look.icon(IconName::Search), look.icon_size.md)
-                    .color(k.alpha(k.c.icon_accent, 0.65))
+                    .color(k.alpha(strata_kit::slots::chrome::action_icon(look), 0.65))
                     .a11y_hidden(),
             )
             .child(input);

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::shape::LookParams;
-use crate::slots::{chrome, collection, columns, icons, sidebar};
+use crate::slots::{chrome, collection, columns, icons, list, scroll, sidebar};
 use crate::theme::{bundled_theme, parse_custom};
 use crate::tokens::{self, Kind};
 
@@ -59,6 +59,25 @@ fn s2_dark_refinements_apply_and_survive_with_params() {
     assert_eq!(
         columns::header_inactive_title(&look),
         crate::theme::Rgba8::parse("#94a3b8").expect("hex").color()
+    );
+    assert_eq!(
+        list::metadata_text(&look),
+        crate::theme::Rgba8::parse("#94a3b8").expect("hex").color()
+    );
+    assert_eq!(
+        scroll::thumb_color(&look),
+        look.kit.alpha(
+            crate::theme::Rgba8::parse("#94a3b8").expect("hex").color(),
+            0.35,
+        )
+    );
+    assert_eq!(
+        icons::caption_selected_fill(&look),
+        crate::theme::Rgba8::parse("#1e2444").expect("hex").color()
+    );
+    assert_eq!(
+        icons::caption_selected_text(&look),
+        crate::theme::Rgba8::parse("#a5b4fc").expect("hex").color()
     );
     assert_eq!(
         icons::frame_icon(&look),

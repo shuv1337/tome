@@ -111,6 +111,7 @@ fn chrome_sidebar_and_collection_color_slots_default_and_override() {
         rune::Color::TRANSPARENT
     );
     assert_eq!(super::collection::hover_fill(&look), look.kit.c.hover);
+    assert_eq!(super::list::metadata_text(&look), look.kit.c.text_base);
     assert_eq!(
         super::columns::header_inactive_title(&look),
         super::columns::fade(
@@ -131,6 +132,7 @@ fn chrome_sidebar_and_collection_color_slots_default_and_override() {
         "collection.selected.border",
         "collection.hover.fill",
         "columns.header.inactive_title",
+        "list.metadata.text",
     ] {
         tokens::set(&mut look, name, Value::Color(custom)).expect("set color slot");
         assert_eq!(tokens::get(&look, name).expect("get"), Value::Color(custom));
@@ -144,4 +146,5 @@ fn chrome_sidebar_and_collection_color_slots_default_and_override() {
     assert_eq!(super::collection::selected_border(&look), custom);
     assert_eq!(super::collection::hover_fill(&look), custom);
     assert_eq!(super::columns::header_inactive_title(&look), custom);
+    assert_eq!(super::list::metadata_text(&look), custom);
 }

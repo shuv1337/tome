@@ -337,7 +337,7 @@ fn requirements_toggle(
     }
     heading = heading.child(el().grow(1.0)).child(
         icon(look.icon(chevron), 14.0)
-            .color(kit.alpha(c.icon_accent, 0.65))
+            .color(kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.65))
             .a11y_hidden(),
     );
     let toggle_id = id.to_owned();

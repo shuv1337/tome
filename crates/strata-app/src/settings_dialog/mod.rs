@@ -705,7 +705,7 @@ fn compact_search_button(app: &App) -> El {
         (
             Color::TRANSPARENT,
             c.hover,
-            kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.75),
+            kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.65),
         )
     };
     let label = tr("Search settings");
@@ -803,7 +803,7 @@ fn nav_colors(look: &strata_kit::look::Look, active: bool) -> NavColors {
         NavColors {
             fill: Color::TRANSPARENT,
             hover: c.hover,
-            icon: kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.75),
+            icon: kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.65),
             title: c.text_muted,
             subtitle: c.text_muted,
         }
@@ -914,7 +914,7 @@ fn close_button(look: &strata_kit::look::Look) -> El {
             .cursor(Cursor::Pointer)
             .child(
                 icon(look.icon(IconName::Close), 18.0)
-                    .color(kit.alpha(c.icon_accent, 0.65))
+                    .color(kit.alpha(strata_kit::slots::chrome::action_icon(look), 0.65))
                     .a11y_hidden(),
             )
             .on_press_tx(|app: &mut App, _: &mut Tx| close_settings(app)),

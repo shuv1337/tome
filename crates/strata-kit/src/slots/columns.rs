@@ -64,6 +64,7 @@ pub fn header_title_font(look: &Look) -> TextStyle {
 }
 
 /// The inactive column header title's colour: `columns.header.inactive_title`, else `bg_accent` at 58 % opacity.
+/// Uses the default opacity constant so changing sibling slot `columns.header.title_opacity` never mutates this token.
 pub fn header_inactive_title(look: &Look) -> Color {
     look.slots
         .columns
